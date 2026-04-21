@@ -1,0 +1,50 @@
+# === 编译产物 / 二进制文件 ===
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+agentlinux
+serverlinux
+server-monitor-linux
+server-monitor-agent
+
+# === 数据库 ===
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# === 配置 / 敏感文件 ===
+agent.conf
+.env
+.env.*
+
+# === Node.js ===
+web/node_modules/
+web/dist/
+
+# === Server 前端嵌入（编译时生成）===
+server/frontend/
+
+# === Go ===
+vendor/
+
+# === 临时文件 ===
+*.bak
+*.tmp
+*.log
+*.update
+.agent-update-tmp*
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
