@@ -1,8 +1,12 @@
 <template>
   <div class="dash">
-    <StatusOverview />
+    <StatusOverview :loading="store.loading" />
 
-    <div class="dash-grid">
+    <div v-if="store.loading && store.servers.length === 0" class="dash-grid">
+      <div v-for="n in 8" :key="n" class="dash-skeleton"></div>
+    </div>
+
+    <div v-else class="dash-grid">
       <ServerCard
         v-for="s in store.servers"
         :key="s.id"
@@ -62,6 +66,20 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 10px;
+}
+
+.dash-skeleton {
+  height: 108px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: linear-gradient(90deg, rgba(127,127,127,0.06) 25%, rgba(127,127,127,0.1) 50%, rgba(127,127,127,0.06) 75%);
+  background-size: 200% 100%;
+  animation: dashSkeleton 1.2s ease-in-out infinite;
+}
+
+@keyframes dashSkeleton {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
 @media (max-width: 1440px) { .dash-grid { grid-template-columns: repeat(3, 1fr); } }

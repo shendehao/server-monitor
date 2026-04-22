@@ -2,6 +2,7 @@
   <div
     class="scard"
     :class="[statusClass, { dead: !server.isOnline }]"
+    :title="cardTitle"
     @click="goDetail"
   >
     <div class="scard-top">
@@ -42,12 +43,14 @@ const props = defineProps<{ server: ServerSummary }>()
 const router = useRouter()
 const gaugeRef = ref<HTMLElement>()
 let chart: echarts.ECharts | null = null
+const handleResize = () => chart?.resize()
 
 const statusClass = computed(() => props.server.isOnline ? props.server.status : 'offline')
 const statusLabel = computed(() => {
   const m: Record<string, string> = { normal: '正常', warning: '警告', danger: '危险', offline: '离线' }
   return m[statusClass.value] || '—'
 })
+const cardTitle = computed(() => props.server.isOnline ? '查看服务器详情' : '服务器离线，暂不可进入详情')
 
 function goDetail() {
   if (props.server.isOnline) router.push(`/server/${props.server.id}`)
@@ -118,9 +121,12 @@ watch(() => props.server.cpuUsage, updateChart)
 
 onMounted(() => {
   initChart()
-  window.addEventListener('resize', () => chart?.resize())
+  window.addEventListener('resize', handleResize)
 })
-onUnmounted(() => chart?.dispose())
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
+  chart?.dispose()
+})
 </script>
 
 <style scoped lang="scss">
@@ -154,7 +160,7 @@ onUnmounted(() => chart?.dispose())
     &::before { opacity: 1; }
   }
 
-  &.dead { opacity: 0.45; cursor: default; }
+  &.dead { opacity: 0.45; cursor: not-allowed; }
   &.warning { border-color: rgba(245,158,11,0.2); }
   &.danger { border-color: rgba(239,68,68,0.2); }
 }

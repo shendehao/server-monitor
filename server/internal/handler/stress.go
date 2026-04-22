@@ -166,28 +166,17 @@ func (h *StressHandler) Start(c *gin.Context) {
 		ID:         taskID,
 		URL:        req.URL,
 		Method:     req.Method,
-		ServerIDs:  make([]string, len(onlineServers)),
+		ServerIDs:  make([]string, 0, len(onlineServers)),
 		Config:     config,
 		StartTime:  time.Now(),
 		Running:    true,
 		Progress:   make(map[string]*AgentProgress),
-		totalCount: int32(len(onlineServers)),
-	}
-
-	for i, s := range onlineServers {
-		task.ServerIDs[i] = s.ID
-		task.Progress[s.ID] = &AgentProgress{
-			ServerID:   s.ID,
-			ServerName: s.Name,
-			Running:    true,
-		}
 	}
 
 	h.tasksMu.Lock()
 	h.tasks[taskID] = task
 	h.tasksMu.Unlock()
 
-	// 向每个在线 Agent 下发压测命令
 	for _, s := range onlineServers {
 		serverID := s.ID
 		ss := &ws.StressSession{
@@ -200,16 +189,32 @@ func (h *StressHandler) Start(c *gin.Context) {
 		}
 		if err := h.agentHub.StartStressTest(serverID, taskID, config, ss); err != nil {
 			log.Printf("向 Agent %s 下发压测失败: %v", serverID, err)
+			continue
 		}
+		task.ServerIDs = append(task.ServerIDs, s.ID)
+		task.Progress[s.ID] = &AgentProgress{
+			ServerID:   s.ID,
+			ServerName: s.Name,
+			Running:    true,
+		}
+		task.totalCount++
+	}
+
+	if task.totalCount == 0 {
+		h.tasksMu.Lock()
+		delete(h.tasks, taskID)
+		h.tasksMu.Unlock()
+		c.JSON(500, gin.H{"error": "所有目标节点下发压测失败，请稍后重试"})
+		return
 	}
 
 	log.Printf("压力测试已启动: taskID=%s url=%s servers=%d concurrency=%d duration=%ds",
-		taskID, req.URL, len(onlineServers), req.Concurrency, req.Duration)
+		taskID, req.URL, len(task.ServerIDs), req.Concurrency, req.Duration)
 
 	c.JSON(200, gin.H{
 		"taskId":  taskID,
-		"servers": len(onlineServers),
-		"message": fmt.Sprintf("压力测试已启动，%d 台服务器参与", len(onlineServers)),
+		"servers": len(task.ServerIDs),
+		"message": fmt.Sprintf("压力测试已启动，%d 台服务器参与", len(task.ServerIDs)),
 	})
 }
 
@@ -231,6 +236,12 @@ func (h *StressHandler) Stop(c *gin.Context) {
 	}
 
 	task.Running = false
+	task.progressMu.Lock()
+	for _, p := range task.Progress {
+		p.Running = false
+	}
+	task.progressMu.Unlock()
+	h.broadcastProgress(taskID, task)
 	c.JSON(200, gin.H{"message": "已发送停止指令"})
 }
 

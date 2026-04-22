@@ -1,27 +1,33 @@
 <template>
   <div class="kpi-strip">
     <div class="kpi" v-for="item in stats" :key="item.label">
-      <span class="kpi-val font-num" :style="{ color: item.accent }">{{ item.value }}</span>
+      <span class="kpi-val font-num" :class="{ placeholder: item.placeholder }" :style="{ color: item.accent }">{{ item.value }}</span>
       <span class="kpi-label">{{ item.label }}</span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, defineProps } from 'vue'
 import { useMonitorStore } from '@/stores/monitor'
+
+const props = defineProps<{
+  loading?: boolean
+}>()
 
 const store = useMonitorStore()
 
 const stats = computed(() => {
   const o = store.overview
+  const loading = props.loading && !o
+  const placeholder = (suffix = '') => loading ? `--${suffix}` : suffix === '%' ? '0.0%' : '0'
   return [
-    { label: '服务器', value: o?.serverCount ?? 0, accent: 'var(--t1)' },
-    { label: '在线', value: o?.onlineCount ?? 0, accent: 'var(--c-green)' },
-    { label: '离线', value: o?.offlineCount ?? 0, accent: 'var(--t3)' },
-    { label: 'CPU 均值', value: (o?.avgCpu ?? 0).toFixed(1) + '%', accent: 'var(--c-cyan)' },
-    { label: '内存均值', value: (o?.avgMemory ?? 0).toFixed(1) + '%', accent: 'var(--c-blue)' },
-    { label: '告警', value: o?.activeAlerts ?? 0, accent: o?.activeAlerts ? 'var(--c-amber)' : 'var(--t3)' },
+    { label: '服务器', value: loading ? placeholder() : (o?.serverCount ?? 0), accent: 'var(--t1)', placeholder: loading },
+    { label: '在线', value: loading ? placeholder() : (o?.onlineCount ?? 0), accent: 'var(--c-green)', placeholder: loading },
+    { label: '离线', value: loading ? placeholder() : (o?.offlineCount ?? 0), accent: 'var(--t3)', placeholder: loading },
+    { label: 'CPU 均值', value: loading ? placeholder('%') : (o?.avgCpu ?? 0).toFixed(1) + '%', accent: 'var(--c-cyan)', placeholder: loading },
+    { label: '内存均值', value: loading ? placeholder('%') : (o?.avgMemory ?? 0).toFixed(1) + '%', accent: 'var(--c-blue)', placeholder: loading },
+    { label: '告警', value: loading ? placeholder() : (o?.activeAlerts ?? 0), accent: loading ? 'var(--t3)' : (o?.activeAlerts ? 'var(--c-amber)' : 'var(--t3)'), placeholder: loading },
   ]
 })
 </script>
@@ -62,6 +68,7 @@ const stats = computed(() => {
   font-size: 20px;
   font-weight: 700;
   line-height: 1;
+  &.placeholder { color: var(--t3) !important; opacity: 0.7; }
 }
 
 .kpi-label {

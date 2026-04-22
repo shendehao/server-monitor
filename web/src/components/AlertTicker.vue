@@ -1,9 +1,9 @@
 <template>
-  <div class="aticker" v-if="store.latestAlerts.length > 0">
+  <div class="aticker" v-if="displayAlerts.length > 0" title="点击查看告警中心" @click="goAlerts">
     <span class="aticker-tag">ALERT</span>
     <div class="aticker-track">
       <div class="aticker-scroll">
-        <span v-for="(a, i) in store.latestAlerts.slice(0, 10)" :key="i" class="aticker-item">
+        <span v-for="(a, i) in displayAlerts" :key="`${a.id || a.createdAt || a.message}-${i}`" class="aticker-item" :title="`${a.serverName} ${a.message}`">
           <span class="adot" :class="a.severity"></span>
           <span class="aserver">{{ a.serverName }}</span>
           <span class="amsg">{{ a.message }}</span>
@@ -15,8 +15,18 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { useMonitorStore } from '@/stores/monitor'
+const router = useRouter()
 const store = useMonitorStore()
+const displayAlerts = computed(() => {
+  const list = store.latestAlerts.slice(0, 10)
+  return list.length > 1 ? [...list, ...list] : list
+})
+function goAlerts() {
+  router.push('/alerts')
+}
 function fmtTime(t: string) {
   return t ? new Date(t).toLocaleTimeString('zh-CN', { hour12: false }) : ''
 }
@@ -31,6 +41,7 @@ function fmtTime(t: string) {
   display: flex;
   align-items: center;
   overflow: hidden;
+  cursor: pointer;
 }
 
 .aticker-tag {
@@ -57,6 +68,10 @@ function fmtTime(t: string) {
   animation: ticker 35s linear infinite;
 }
 
+.aticker:hover .aticker-scroll {
+  animation-play-state: paused;
+}
+
 .aticker-item {
   display: inline-flex;
   align-items: center;
@@ -76,6 +91,6 @@ function fmtTime(t: string) {
 }
 
 .aserver { color: var(--t1); font-weight: 500; }
-.amsg { color: var(--t2); }
+.amsg { color: var(--t2); max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
 .atime { color: var(--t3); font-size: 10px; }
 </style>

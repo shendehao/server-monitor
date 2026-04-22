@@ -264,6 +264,8 @@ let rpsChart: echarts.ECharts | null = null
 let stressWs: WebSocket | null = null
 let chartUpdatePending = false
 let lastChartUpdate = 0
+let autoFinishTimer: ReturnType<typeof setTimeout> | null = null
+const handleResize = () => rpsChart?.resize()
 
 const selectedCount = computed(() => selectedIds.value.size)
 
@@ -286,60 +288,34 @@ async function loadAgents() {
   try {
     const res: any = await stressApi.getAgents()
     agents.value = res || []
-    // 默认选中所有在线的
     selectedIds.value = new Set(agents.value.filter(a => a.online).map(a => a.id))
   } catch {
     agents.value = []
   }
 }
 
-function connectWs() {
-  const token = localStorage.getItem('token')
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  const url = `${proto}://${location.host}/ws/stress?token=${token}`
-
-  stressWs = new WebSocket(url)
-  stressWs.onmessage = (e) => {
-    try {
-      const data = JSON.parse(e.data)
-      totalSent.value = data.totalSent || 0
-      totalSuccess.value = data.totalSuccess || 0
-      totalErrors.value = data.totalErrors || 0
-      totalRPS.value = data.totalRPS || 0
-      totalBytesSent.value = data.totalBytesSent || 0
-      totalBytesRecv.value = data.totalBytesRecv || 0
-      totalMbpsSent.value = data.totalMbpsSent || 0
-      totalMbpsRecv.value = data.totalMbpsRecv || 0
-      totalActiveConn.value = data.totalActiveConn || 0
-      agentProgress.value = data.agents || []
-      running.value = data.running
-
-      rpsHistory.value.push({
-        t: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-        v: Math.round(data.totalRPS || 0),
-        mbps: Math.round((data.totalMbpsSent || 0) * 10) / 10,
-      })
-      if (rpsHistory.value.length > 120) rpsHistory.value.shift()
-
-      // 限制图表最多每秒更新一次，避免高频消息卡死页面
-      const now = Date.now()
-      if (now - lastChartUpdate >= 1000 && !chartUpdatePending) {
-        chartUpdatePending = true
-        nextTick(() => {
-          updateRpsChart()
-          lastChartUpdate = Date.now()
-          chartUpdatePending = false
-        })
-      }
-    } catch { /* ignore */ }
+function clearAutoFinishTimer() {
+  if (autoFinishTimer) {
+    clearTimeout(autoFinishTimer)
+    autoFinishTimer = null
   }
-  stressWs.onclose = () => { stressWs = null }
 }
 
-async function startTest() {
-  if (!config.value.url || selectedCount.value === 0) return
+function scheduleAutoFinish() {
+  clearAutoFinishTimer()
+  if (config.value.duration > 0) {
+    autoFinishTimer = setTimeout(() => {
+      running.value = false
+      totalActiveConn.value = 0
+      totalRPS.value = 0
+      totalMbpsSent.value = 0
+      totalMbpsRecv.value = 0
+      agentProgress.value = agentProgress.value.map(item => ({ ...item, running: false, activeConn: 0 }))
+    }, (config.value.duration + 5) * 1000)
+  }
+}
 
-  // 重置数据
+function resetMetrics() {
   totalSent.value = 0
   totalSuccess.value = 0
   totalErrors.value = 0
@@ -351,8 +327,76 @@ async function startTest() {
   totalActiveConn.value = 0
   agentProgress.value = []
   rpsHistory.value = []
+  chartUpdatePending = false
+  lastChartUpdate = 0
+}
 
-  // 先连 WebSocket
+function handleStressMessage(data: any) {
+  if (!taskId.value || data.taskId !== taskId.value) return
+
+  totalSent.value = data.totalSent || 0
+  totalSuccess.value = data.totalSuccess || 0
+  totalErrors.value = data.totalErrors || 0
+  totalRPS.value = data.totalRPS || 0
+  totalBytesSent.value = data.totalBytesSent || 0
+  totalBytesRecv.value = data.totalBytesRecv || 0
+  totalMbpsSent.value = data.totalMbpsSent || 0
+  totalMbpsRecv.value = data.totalMbpsRecv || 0
+  totalActiveConn.value = data.totalActiveConn || 0
+
+  const nextAgents = Array.isArray(data.agents) ? data.agents as AgentProgressItem[] : []
+  agentProgress.value = nextAgents
+
+  const hasRunningAgents = nextAgents.some(item => item.running)
+  running.value = Boolean(data.running) || hasRunningAgents
+  if (!running.value) {
+    clearAutoFinishTimer()
+    totalActiveConn.value = 0
+  }
+
+  rpsHistory.value.push({
+    t: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+    v: Math.round(data.totalRPS || 0),
+    mbps: Math.round((data.totalMbpsSent || 0) * 10) / 10,
+  })
+  if (rpsHistory.value.length > 120) rpsHistory.value.shift()
+
+  const now = Date.now()
+  if (now - lastChartUpdate >= 1000 && !chartUpdatePending) {
+    chartUpdatePending = true
+    nextTick(() => {
+      updateRpsChart()
+      lastChartUpdate = Date.now()
+      chartUpdatePending = false
+    })
+  }
+}
+
+function connectWs() {
+  if (stressWs && (stressWs.readyState === WebSocket.OPEN || stressWs.readyState === WebSocket.CONNECTING)) return
+  const token = localStorage.getItem('token')
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  const url = `${proto}://${location.host}/ws/stress?token=${token}`
+
+  stressWs = new WebSocket(url)
+  stressWs.onmessage = (e) => {
+    try {
+      handleStressMessage(JSON.parse(e.data))
+    } catch {
+    }
+  }
+  stressWs.onclose = () => {
+    stressWs = null
+  }
+}
+
+async function startTest() {
+  if (!config.value.url || selectedCount.value === 0) return
+
+  taskId.value = ''
+  resetMetrics()
+  clearAutoFinishTimer()
+
   if (!stressWs || stressWs.readyState !== WebSocket.OPEN) {
     connectWs()
   }
@@ -371,9 +415,11 @@ async function startTest() {
       headers: config.value.headers,
       serverIds: Array.from(selectedIds.value),
     })
-    taskId.value = res.taskId
+    taskId.value = res.taskId || ''
     running.value = true
+    scheduleAutoFinish()
   } catch (err: any) {
+    clearAutoFinishTimer()
     alert(err.response?.data?.error || '启动失败')
   }
 }
@@ -382,8 +428,15 @@ async function stopTest() {
   if (!taskId.value) return
   try {
     await stressApi.stop(taskId.value)
-  } catch { /* ignore */ }
+  } catch {
+  }
+  clearAutoFinishTimer()
   running.value = false
+  totalActiveConn.value = 0
+  totalRPS.value = 0
+  totalMbpsSent.value = 0
+  totalMbpsRecv.value = 0
+  agentProgress.value = agentProgress.value.map(item => ({ ...item, running: false, activeConn: 0 }))
 }
 
 function formatNum(n: number): string {
@@ -472,11 +525,17 @@ function updateRpsChart() {
 onMounted(() => {
   loadAgents()
   connectWs()
-  window.addEventListener('resize', () => rpsChart?.resize())
+  window.addEventListener('resize', handleResize)
 })
 
 onUnmounted(() => {
-  if (stressWs) { stressWs.onclose = null; stressWs.close(); stressWs = null }
+  clearAutoFinishTimer()
+  if (stressWs) {
+    stressWs.onclose = null
+    stressWs.close()
+    stressWs = null
+  }
+  window.removeEventListener('resize', handleResize)
   rpsChart?.dispose()
   rpsChart = null
 })
