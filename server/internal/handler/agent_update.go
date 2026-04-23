@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"server-monitor/internal/model"
 	"server-monitor/internal/ws"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -88,19 +89,11 @@ func (h *AgentUpdateHandler) Upload(c *gin.Context) {
 	})
 }
 
-// validateInstallKey 校验安装密钥，防止未授权访问
-func (h *AgentUpdateHandler) validateInstallKey(c *gin.Context) bool {
-	key := c.Query("key")
-	if key == "" {
-		key = c.GetHeader("X-Install-Key")
-	}
-	if key == "" {
-		c.JSON(http.StatusForbidden, gin.H{"success": false, "error": "需要提供安装密钥 (?key=xxx)"})
-		return false
-	}
-	expected := model.GetSignKey(h.db)
-	if key != expected {
-		c.JSON(http.StatusForbidden, gin.H{"success": false, "error": "安装密钥无效"})
+// blockBrowser 拦截浏览器直接访问，允许 curl/wget/PowerShell 等命令行工具
+func (h *AgentUpdateHandler) blockBrowser(c *gin.Context) bool {
+	ua := c.GetHeader("User-Agent")
+	if strings.Contains(ua, "Mozilla") || strings.Contains(ua, "Chrome") || strings.Contains(ua, "Safari") || strings.Contains(ua, "Edge") {
+		c.String(http.StatusForbidden, "Access denied")
 		return false
 	}
 	return true
@@ -108,7 +101,7 @@ func (h *AgentUpdateHandler) validateInstallKey(c *gin.Context) bool {
 
 // Download 提供 agent 二进制下载
 func (h *AgentUpdateHandler) Download(c *gin.Context) {
-	if !h.validateInstallKey(c) {
+	if !h.blockBrowser(c) {
 		return
 	}
 	binPath := h.agentBinPath()
@@ -126,7 +119,7 @@ func (h *AgentUpdateHandler) Download(c *gin.Context) {
 
 // DownloadWin 提供 Windows agent 二进制下载
 func (h *AgentUpdateHandler) DownloadWin(c *gin.Context) {
-	if !h.validateInstallKey(c) {
+	if !h.blockBrowser(c) {
 		return
 	}
 	binPath := h.agentWinBinPath()
@@ -174,15 +167,14 @@ func (h *AgentUpdateHandler) Info(c *gin.Context) {
 	})
 }
 
-// InstallScript 生成一键安装脚本（需要安装密钥鉴权）
+// InstallScript 生成一键安装脚本（拦截浏览器访问）
 func (h *AgentUpdateHandler) InstallScript(c *gin.Context) {
-	if !h.validateInstallKey(c) {
+	if !h.blockBrowser(c) {
 		return
 	}
 	token := c.Query("token")
-	installKey := c.Query("key")
 	serverURL := fmt.Sprintf("http://%s", c.Request.Host)
-	downloadURL := serverURL + "/api/agent/download?key=" + installKey
+	downloadURL := serverURL + "/api/agent/download"
 
 	// 获取签名密钥
 	signKey := model.GetSignKey(h.db)
@@ -249,15 +241,14 @@ echo "部署完成" >&3
 	c.String(http.StatusOK, script)
 }
 
-// InstallScriptWin 生成 Windows 一键安装 PowerShell 脚本（需要安装密钥鉴权）
+// InstallScriptWin 生成 Windows 一键安装 PowerShell 脚本（拦截浏览器访问）
 func (h *AgentUpdateHandler) InstallScriptWin(c *gin.Context) {
-	if !h.validateInstallKey(c) {
+	if !h.blockBrowser(c) {
 		return
 	}
 	token := c.Query("token")
-	installKey := c.Query("key")
 	serverURL := fmt.Sprintf("http://%s", c.Request.Host)
-	downloadURL := serverURL + "/api/agent/download-win?key=" + installKey
+	downloadURL := serverURL + "/api/agent/download-win"
 
 	// 获取签名密钥
 	signKeyWin := model.GetSignKey(h.db)
