@@ -80,7 +80,11 @@ func handleScreenStart(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessa
 
 	log.Printf("桌面截图会话已启动: id=%s, fps=%d, quality=%d, scale=%d%%", msg.ID, payload.FPS, payload.Quality, payload.Scale)
 
-	go screenCaptureLoop(session, payload)
+	if shouldUseHelper() {
+		go screenCaptureLoopSession0(session, payload)
+	} else {
+		go screenCaptureLoop(session, payload)
+	}
 }
 
 func screenCaptureLoop(session *ScreenSession, cfg ScreenStartPayload) {
@@ -106,7 +110,7 @@ func screenCaptureLoop(session *ScreenSession, cfg ScreenStartPayload) {
 			return
 		case <-ticker.C:
 			jpegBuf.Reset()
-			w, h, hash, err := captureScreenBinary(&jpegBuf, cfg.Quality, cfg.Scale)
+			w, h, hash, err := captureScreenWithFallback(&jpegBuf, cfg.Quality, cfg.Scale)
 			if err != nil {
 				errCount++
 				log.Printf("截图失败: %v", err)
