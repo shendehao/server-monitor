@@ -9,6 +9,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/robfig/cron/v3 v3.0.1
 	golang.org/x/crypto v0.26.0
+	golang.org/x/text v0.17.0
 	gorm.io/gorm v1.25.11
 )
 
@@ -42,7 +43,6 @@ require (
 	golang.org/x/arch v0.8.0 // indirect
 	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/sys v0.23.0 // indirect
-	golang.org/x/text v0.17.0 // indirect
 	google.golang.org/protobuf v1.34.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.22.5 // indirect

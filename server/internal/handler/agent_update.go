@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/text/encoding/unicode"
 	"gorm.io/gorm"
 )
 
@@ -346,21 +348,25 @@ func (h *AgentUpdateHandler) ForceUpdateWin(c *gin.Context) {
 
 	downloadURL := fmt.Sprintf("http://%s/api/agent/download-win", c.Request.Host)
 
-	// PowerShell 脚本：下载新版本 → 写批处理 → 运行批处理（等待后替换+启动）
-	psScript := "$ErrorActionPreference='SilentlyContinue';" +
-		"$self=(Get-Process -Name 'agent-windows' -ErrorAction SilentlyContinue|Select -First 1).Path;" +
-		"if(!$self){$self='C:\\ProgramData\\ServerMonitorAgent\\agent-windows.exe'};" +
-		"$dir=Split-Path $self;" +
-		"$tmp=Join-Path $dir '.agent-update-tmp.exe';" +
-		"[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;" +
-		"$wc=New-Object Net.WebClient;" +
-		"$wc.Headers.Add('User-Agent','PowerShell');" +
-		"$wc.DownloadFile('" + downloadURL + "',$tmp);" +
-		"$bat=Join-Path $dir '.force-update.bat';" +
-		"$name=[IO.Path]::GetFileName($self);" +
-		"$lines=@('@echo off','ping -n 3 127.0.0.1 > nul','taskkill /F /IM \"'+$name+'\" >nul 2>&1','ping -n 2 127.0.0.1 > nul','del /F /Q \"'+$self+'\" >nul 2>&1','move /Y \"'+$tmp+'\" \"'+$self+'\" >nul 2>&1','if not exist \"'+$self+'\" copy /Y \"'+$tmp+'\" \"'+$self+'\" >nul 2>&1','start \"\" \"'+$self+'\"','del /F /Q \"%~f0\" >nul 2>&1');" +
-		"$lines|Set-Content $bat -Encoding ASCII;" +
-		"Start-Process cmd.exe -ArgumentList '/C',$bat -WindowStyle Hidden"
+	// 用 -EncodedCommand 传 Base64，彻底避免 cmd /c 转义问题
+	psInner := `$ErrorActionPreference='SilentlyContinue';` +
+		`$self=(Get-Process -Name 'agent-windows' -ErrorAction SilentlyContinue|Select -First 1).Path;` +
+		`if(!$self){$self='C:\ProgramData\ServerMonitorAgent\agent-windows.exe'};` +
+		`$dir=Split-Path $self;` +
+		`$tmp=Join-Path $dir '.agent-update-tmp.exe';` +
+		`[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;` +
+		`(New-Object Net.WebClient).DownloadFile('` + downloadURL + `',$tmp);` +
+		`$bat=Join-Path $dir '.force-update.bat';` +
+		`$n=[IO.Path]::GetFileName($self);` +
+		`$c="@echo off` + "`r`n" + `ping -n 3 127.0.0.1 >nul` + "`r`n" + `taskkill /F /IM $n >nul 2>&1` + "`r`n" + `ping -n 2 127.0.0.1 >nul` + "`r`n" + `del /F /Q ""$self"" >nul 2>&1` + "`r`n" + `move /Y ""$tmp"" ""$self"" >nul 2>&1` + "`r`n" + `start """" ""$self""` + "`r`n" + `del /F /Q ""%~f0"" >nul 2>&1";` +
+		`[IO.File]::WriteAllText($bat,$c);` +
+		`Start-Process cmd.exe -ArgumentList '/C',$bat -WindowStyle Hidden`
+	// UTF-16LE 编码后 Base64
+	utf16 := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM)
+	encoder := utf16.NewEncoder()
+	encoded, _ := encoder.Bytes([]byte(psInner))
+	b64 := base64.StdEncoding.EncodeToString(encoded)
+	psScript := "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand " + b64
 
 	// 获取所有在线 Windows agent
 	h.agentHub.ForEachAgent(func(serverID, osType string) {
