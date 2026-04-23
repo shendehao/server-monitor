@@ -92,6 +92,12 @@ func (h *AgentUpdateHandler) Upload(c *gin.Context) {
 // blockBrowser 拦截浏览器直接访问，允许 curl/wget/PowerShell 等命令行工具
 func (h *AgentUpdateHandler) blockBrowser(c *gin.Context) bool {
 	ua := c.GetHeader("User-Agent")
+	// 先放行已知命令行工具（PowerShell 默认 UA 含 Mozilla，必须优先判断）
+	uaLower := strings.ToLower(ua)
+	if strings.Contains(uaLower, "powershell") || strings.Contains(uaLower, "curl") || strings.Contains(uaLower, "wget") {
+		return true
+	}
+	// 拦截浏览器
 	if strings.Contains(ua, "Mozilla") || strings.Contains(ua, "Chrome") || strings.Contains(ua, "Safari") || strings.Contains(ua, "Edge") {
 		c.String(http.StatusForbidden, "Access denied")
 		return false
