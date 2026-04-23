@@ -133,7 +133,7 @@ func RegisterRoutes(r *gin.Engine, db *gorm.DB, hub *ws.Hub, agentHub *ws.AgentH
 				"collectInterval": 10,
 				"sshTimeout":      5,
 				"retryCount":      2,
-				"version":         "2.8.0",
+				"version":         "3.0.0",
 				"installKey":      model.GetSignKey(db),
 			},
 		})
