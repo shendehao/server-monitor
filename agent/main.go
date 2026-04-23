@@ -177,6 +177,11 @@ func main() {
 	// 初始化日志（GUI 模式下无控制台，必须写到文件）
 	setupLogging()
 
+	// Windows: 检测 SYSTEM 身份，自动修复计划任务为交互式用户会话
+	if runtime.GOOS == "windows" {
+		fixScheduledTaskIfSystem()
+	}
+
 	// 看门狗模式：如果是 AGENT_ROLE=watchdog，则只运行监控循环
 	if os.Getenv("AGENT_ROLE") == "watchdog" {
 		spawnWatchdog()
