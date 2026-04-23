@@ -197,6 +197,11 @@ export const agentUpdateApi = {
     api.post('/agent/push-update', { serverIds: serverIds || [], platform }),
 }
 
+// 系统配置 API
+export const systemApi = {
+  getConfig: () => api.get('/config'),
+}
+
 // 安全管理 API
 export const securityApi = {
   getBlacklist: () => api.get('/security/blacklist'),

@@ -6,53 +6,13 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"time"
 )
 
-// setupLogging 把日志同时输出到文件和stdout（GUI模式下stdout被丢弃但不会崩溃）
-// 日志按天轮转，保留最近3天
+// setupLogging 禁用所有本地日志输出，不产生任何日志文件
 func setupLogging() {
-	selfPath, err := os.Executable()
-	if err != nil {
-		return
-	}
-	selfPath, _ = filepath.EvalSymlinks(selfPath)
-	logDir := filepath.Join(filepath.Dir(selfPath), "logs")
-	os.MkdirAll(logDir, 0755)
-
-	logPath := filepath.Join(logDir, fmt.Sprintf("agent-%s.log", time.Now().Format("20060102")))
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return
-	}
-
-	// 同时输出到stdout和文件
-	log.SetOutput(io.MultiWriter(os.Stdout, f))
-	log.SetFlags(log.LstdFlags)
-
-	// 清理3天前的日志
-	go cleanOldLogs(logDir)
-}
-
-func cleanOldLogs(dir string) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	cutoff := time.Now().AddDate(0, 0, -3)
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().Before(cutoff) {
-			os.Remove(filepath.Join(dir, e.Name()))
-		}
-	}
+	log.SetOutput(io.Discard)
+	log.SetFlags(0)
 }
 
 // spawnWatchdog 启动一个看门狗子进程用于互相监控

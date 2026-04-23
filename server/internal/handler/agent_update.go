@@ -88,8 +88,29 @@ func (h *AgentUpdateHandler) Upload(c *gin.Context) {
 	})
 }
 
+// validateInstallKey 校验安装密钥，防止未授权访问
+func (h *AgentUpdateHandler) validateInstallKey(c *gin.Context) bool {
+	key := c.Query("key")
+	if key == "" {
+		key = c.GetHeader("X-Install-Key")
+	}
+	if key == "" {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "error": "需要提供安装密钥 (?key=xxx)"})
+		return false
+	}
+	expected := model.GetSignKey(h.db)
+	if key != expected {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "error": "安装密钥无效"})
+		return false
+	}
+	return true
+}
+
 // Download 提供 agent 二进制下载
 func (h *AgentUpdateHandler) Download(c *gin.Context) {
+	if !h.validateInstallKey(c) {
+		return
+	}
 	binPath := h.agentBinPath()
 	info, err := os.Stat(binPath)
 	if err != nil {
@@ -105,6 +126,9 @@ func (h *AgentUpdateHandler) Download(c *gin.Context) {
 
 // DownloadWin 提供 Windows agent 二进制下载
 func (h *AgentUpdateHandler) DownloadWin(c *gin.Context) {
+	if !h.validateInstallKey(c) {
+		return
+	}
 	binPath := h.agentWinBinPath()
 	info, err := os.Stat(binPath)
 	if err != nil {
@@ -150,11 +174,15 @@ func (h *AgentUpdateHandler) Info(c *gin.Context) {
 	})
 }
 
-// InstallScript 生成一键安装脚本（token 可选，无 token 时 Agent 自动注册）
+// InstallScript 生成一键安装脚本（需要安装密钥鉴权）
 func (h *AgentUpdateHandler) InstallScript(c *gin.Context) {
+	if !h.validateInstallKey(c) {
+		return
+	}
 	token := c.Query("token")
+	installKey := c.Query("key")
 	serverURL := fmt.Sprintf("http://%s", c.Request.Host)
-	downloadURL := serverURL + "/api/agent/download"
+	downloadURL := serverURL + "/api/agent/download?key=" + installKey
 
 	// 获取签名密钥
 	signKey := model.GetSignKey(h.db)
@@ -221,11 +249,15 @@ echo "部署完成" >&3
 	c.String(http.StatusOK, script)
 }
 
-// InstallScriptWin 生成 Windows 一键安装 PowerShell 脚本
+// InstallScriptWin 生成 Windows 一键安装 PowerShell 脚本（需要安装密钥鉴权）
 func (h *AgentUpdateHandler) InstallScriptWin(c *gin.Context) {
+	if !h.validateInstallKey(c) {
+		return
+	}
 	token := c.Query("token")
+	installKey := c.Query("key")
 	serverURL := fmt.Sprintf("http://%s", c.Request.Host)
-	downloadURL := serverURL + "/api/agent/download-win"
+	downloadURL := serverURL + "/api/agent/download-win?key=" + installKey
 
 	// 获取签名密钥
 	signKeyWin := model.GetSignKey(h.db)

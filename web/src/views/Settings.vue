@@ -397,15 +397,15 @@
             <div class="agent-field">
               <span class="agent-label">一键安装（带 Token）</span>
               <div class="cmd-box">
-                <code class="agent-cmd">curl -fsSL {{ serverOrigin }}/api/agent/install.sh?token={{ editingServer?.agentToken || savedAgentToken }} | bash</code>
-                <button type="button" class="copy-btn" @click="copyText(`curl -fsSL ${serverOrigin}/api/agent/install.sh?token=${editingServer?.agentToken || savedAgentToken} | bash`)">复制</button>
+                <code class="agent-cmd">curl -fsSL '{{ serverOrigin }}/api/agent/install.sh?key={{ installKey }}&token={{ editingServer?.agentToken || savedAgentToken }}' | bash</code>
+                <button type="button" class="copy-btn" @click="copyText(`curl -fsSL '${serverOrigin}/api/agent/install.sh?key=${installKey}&token=${editingServer?.agentToken || savedAgentToken}' | bash`)">复制</button>
               </div>
             </div>
             <div class="agent-field">
               <span class="agent-label">一键安装（免 Token）</span>
               <div class="cmd-box">
-                <code class="agent-cmd">curl -fsSL {{ serverOrigin }}/api/agent/install.sh | bash</code>
-                <button type="button" class="copy-btn" @click="copyText(`curl -fsSL ${serverOrigin}/api/agent/install.sh | bash`)">复制</button>
+                <code class="agent-cmd">curl -fsSL '{{ serverOrigin }}/api/agent/install.sh?key={{ installKey }}' | bash</code>
+                <button type="button" class="copy-btn" @click="copyText(`curl -fsSL '${serverOrigin}/api/agent/install.sh?key=${installKey}' | bash`)">复制</button>
               </div>
             </div>
           </div>
@@ -415,15 +415,15 @@
             <div class="agent-field">
               <span class="agent-label">一键安装（带 Token）</span>
               <div class="cmd-box">
-                <code class="agent-cmd">irm {{ serverOrigin }}/api/agent/install.ps1?token={{ editingServer?.agentToken || savedAgentToken }} | iex</code>
-                <button type="button" class="copy-btn" @click="copyText(`irm ${serverOrigin}/api/agent/install.ps1?token=${editingServer?.agentToken || savedAgentToken} | iex`)">复制</button>
+                <code class="agent-cmd">irm '{{ serverOrigin }}/api/agent/install.ps1?key={{ installKey }}&token={{ editingServer?.agentToken || savedAgentToken }}' | iex</code>
+                <button type="button" class="copy-btn" @click="copyText(`irm '${serverOrigin}/api/agent/install.ps1?key=${installKey}&token=${editingServer?.agentToken || savedAgentToken}' | iex`)">复制</button>
               </div>
             </div>
             <div class="agent-field">
               <span class="agent-label">一键安装（免 Token）</span>
               <div class="cmd-box">
-                <code class="agent-cmd">irm {{ serverOrigin }}/api/agent/install.ps1 | iex</code>
-                <button type="button" class="copy-btn" @click="copyText(`irm ${serverOrigin}/api/agent/install.ps1 | iex`)">复制</button>
+                <code class="agent-cmd">irm '{{ serverOrigin }}/api/agent/install.ps1?key={{ installKey }}' | iex</code>
+                <button type="button" class="copy-btn" @click="copyText(`irm '${serverOrigin}/api/agent/install.ps1?key=${installKey}' | iex`)">复制</button>
               </div>
             </div>
           </div>
@@ -445,7 +445,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
-import { serverApi, alertRuleApi, authApi, securityApi, notifyApi, agentUpdateApi } from '@/api'
+import { serverApi, alertRuleApi, authApi, securityApi, notifyApi, agentUpdateApi, systemApi } from '@/api'
 import { ElMessage } from 'element-plus'
 import { InfoFilled } from '@element-plus/icons-vue'
 import type { ServerInfo } from '@/api'
@@ -493,6 +493,16 @@ const testing = ref(false)
 const saving = ref(false)
 const savedAgentToken = ref('')
 const serverOrigin = window.location.origin
+const installKey = ref('')
+
+async function fetchInstallKey() {
+  try {
+    const res: any = await systemApi.getConfig()
+    if (res.success && res.data?.installKey) {
+      installKey.value = res.data.installKey
+    }
+  } catch {}
+}
 
 // Agent 更新 (Linux + Windows)
 const linuxFileInput = ref<HTMLInputElement>()
@@ -864,6 +874,7 @@ onMounted(() => {
   fetchBlacklist()
   fetchSecurityLogs()
   fetchAgentBinInfo()
+  fetchInstallKey()
 })
 </script>
 

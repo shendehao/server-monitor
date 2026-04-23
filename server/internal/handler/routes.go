@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"server-monitor/internal/model"
 	"server-monitor/internal/service"
 	"server-monitor/internal/ws"
 
@@ -122,6 +123,7 @@ func RegisterRoutes(r *gin.Engine, db *gorm.DB, hub *ws.Hub, agentHub *ws.AgentH
 				"sshTimeout":      5,
 				"retryCount":      2,
 				"version":         "2.2.0",
+				"installKey":      model.GetSignKey(db),
 			},
 		})
 	})
