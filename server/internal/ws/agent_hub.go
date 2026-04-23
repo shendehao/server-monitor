@@ -46,6 +46,11 @@ type TermSession struct {
 	OnMode   func(mode string) // "conpty" 或 "pipe"
 }
 
+// ScreenSession 桌面截图会话回调
+type ScreenSession struct {
+	OnFrame func(data json.RawMessage)
+}
+
 // StressSession 压力测试会话回调
 type StressSession struct {
 	OnProgress func(data json.RawMessage)
@@ -65,6 +70,9 @@ type AgentConn struct {
 	// 终端会话
 	termSessions   map[string]*TermSession
 	termSessionsMu sync.Mutex
+	// 截图会话
+	screenSessions   map[string]*ScreenSession
+	screenSessionsMu sync.Mutex
 	// 压测会话
 	stressSessions   map[string]*StressSession
 	stressSessionsMu sync.Mutex
@@ -250,6 +258,57 @@ func (h *AgentHub) CloseTermSession(serverID, sessionID string) {
 	}
 }
 
+// StartScreenSession 在 Agent 上启动桌面截图会话
+func (h *AgentHub) StartScreenSession(serverID, sessionID string, fps, quality, scale int, ss *ScreenSession) error {
+	h.mu.RLock()
+	agent, ok := h.agents[serverID]
+	h.mu.RUnlock()
+	if !ok {
+		return &AgentOfflineError{ServerID: serverID}
+	}
+
+	agent.screenSessionsMu.Lock()
+	agent.screenSessions[sessionID] = ss
+	agent.screenSessionsMu.Unlock()
+
+	payload, _ := json.Marshal(struct {
+		FPS     int `json:"fps"`
+		Quality int `json:"quality"`
+		Scale   int `json:"scale"`
+	}{FPS: fps, Quality: quality, Scale: scale})
+	msg := h.signMsg(AgentMessage{Type: "screen_start", ID: sessionID, Payload: payload})
+
+	select {
+	case agent.send <- msg:
+		return nil
+	default:
+		agent.screenSessionsMu.Lock()
+		delete(agent.screenSessions, sessionID)
+		agent.screenSessionsMu.Unlock()
+		return &AgentOfflineError{ServerID: serverID}
+	}
+}
+
+// StopScreenSession 停止桌面截图会话
+func (h *AgentHub) StopScreenSession(serverID, sessionID string) {
+	h.mu.RLock()
+	agent, ok := h.agents[serverID]
+	h.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	agent.screenSessionsMu.Lock()
+	delete(agent.screenSessions, sessionID)
+	agent.screenSessionsMu.Unlock()
+
+	msg := h.signMsg(AgentMessage{Type: "screen_stop", ID: sessionID})
+	select {
+	case agent.send <- msg:
+	case <-time.After(3 * time.Second):
+	}
+}
+
 // StartStressTest 在 Agent 上启动压力测试
 func (h *AgentHub) StartStressTest(serverID, taskID string, config json.RawMessage, ss *StressSession) error {
 	h.mu.RLock()
@@ -364,6 +423,7 @@ func HandleAgentWebSocket(hub *AgentHub, w http.ResponseWriter, r *http.Request,
 		hub:            hub,
 		pending:        make(map[string]chan *ExecResult),
 		termSessions:   make(map[string]*TermSession),
+		screenSessions: make(map[string]*ScreenSession),
 		stressSessions: make(map[string]*StressSession),
 	}
 
@@ -477,6 +537,13 @@ func (a *AgentConn) readPump() {
 				delete(a.termSessions, msg.ID)
 			}
 			a.termSessionsMu.Unlock()
+
+		case "screen_frame":
+			a.screenSessionsMu.Lock()
+			if ss, ok := a.screenSessions[msg.ID]; ok {
+				ss.OnFrame(msg.Payload)
+			}
+			a.screenSessionsMu.Unlock()
 
 		case "stress_progress":
 			a.stressSessionsMu.Lock()

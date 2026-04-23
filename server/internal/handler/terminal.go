@@ -19,6 +19,7 @@ import (
 )
 
 var termSessionSeq uint64
+var screenSessionSeq uint64
 
 type TerminalHandler struct {
 	db       *gorm.DB
@@ -318,6 +319,89 @@ func sanitizeUTF8(data []byte) []byte {
 		}
 	}
 	return clean
+}
+
+// HandleScreen 处理桌面实时查看 WebSocket
+func (h *TerminalHandler) HandleScreen(w http.ResponseWriter, r *http.Request, server model.Server) {
+	wsConn, err := termUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("桌面查看 WebSocket 升级失败: %v", err)
+		return
+	}
+	defer wsConn.Close()
+
+	serverID := server.ID
+	sessionID := fmt.Sprintf("screen-%d-%d", time.Now().UnixNano(), atomic.AddUint64(&screenSessionSeq, 1))
+
+	if !h.agentHub.IsAgentOnline(serverID) {
+		wsConn.WriteMessage(gorillaws.TextMessage, []byte(`{"type":"error","message":"Agent 不在线"}`))
+		return
+	}
+
+	done := make(chan struct{})
+	var wsMu sync.Mutex
+
+	ss := &ws.ScreenSession{
+		OnFrame: func(data json.RawMessage) {
+			wsMu.Lock()
+			wsConn.WriteMessage(gorillaws.TextMessage, data)
+			wsMu.Unlock()
+		},
+	}
+
+	// 默认参数
+	fps, quality, scale := 2, 50, 50
+
+	if err := h.agentHub.StartScreenSession(serverID, sessionID, fps, quality, scale, ss); err != nil {
+		wsConn.WriteMessage(gorillaws.TextMessage, []byte(`{"type":"error","message":"启动截图失败"}`))
+		return
+	}
+
+	// 读取浏览器消息（控制命令）
+	go func() {
+		defer func() {
+			h.agentHub.StopScreenSession(serverID, sessionID)
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		}()
+		for {
+			_, data, err := wsConn.ReadMessage()
+			if err != nil {
+				return
+			}
+			// 解析控制消息
+			var ctrl struct {
+				Type    string `json:"type"`
+				FPS     int    `json:"fps"`
+				Quality int    `json:"quality"`
+				Scale   int    `json:"scale"`
+			}
+			if json.Unmarshal(data, &ctrl) == nil {
+				if ctrl.Type == "config" {
+					// 重启截图会话并更新参数
+					h.agentHub.StopScreenSession(serverID, sessionID)
+					newID := fmt.Sprintf("screen-%d-%d", time.Now().UnixNano(), atomic.AddUint64(&screenSessionSeq, 1))
+					if ctrl.FPS > 0 {
+						fps = ctrl.FPS
+					}
+					if ctrl.Quality > 0 {
+						quality = ctrl.Quality
+					}
+					if ctrl.Scale > 0 {
+						scale = ctrl.Scale
+					}
+					sessionID = newID
+					h.agentHub.StartScreenSession(serverID, sessionID, fps, quality, scale, ss)
+				}
+			}
+		}
+	}()
+
+	<-done
+	log.Printf("桌面查看会话已结束: server=%s session=%s", server.Name, sessionID)
 }
 
 // ValidateAndGetServer 验证 JWT 并获取服务器信息（用于 WebSocket 端点）

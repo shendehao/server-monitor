@@ -327,6 +327,10 @@ func wsLoop(serverURL, token, signKeyHex string) {
 				handlePtyResize(msg)
 			case "pty_close":
 				handlePtyClose(msg)
+			case "screen_start":
+				go handleScreenStart(conn, &writeMu, msg)
+			case "screen_stop":
+				handleScreenStop(msg)
 			case "stress_start":
 				go handleStressStart(conn, &writeMu, msg)
 			case "stress_stop":
@@ -349,8 +353,9 @@ func wsLoop(serverURL, token, signKeyHex string) {
 		}
 		stressRunner.mu.Unlock()
 
-		// 清理所有 PTY 会话
+		// 清理所有 PTY 和截图会话
 		cleanupAllPtySessions()
+		cleanupAllScreenSessions()
 		// 等待所有执行中的命令完成后再关闭连接
 		wg.Wait()
 		conn.Close()

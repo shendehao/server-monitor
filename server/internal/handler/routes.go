@@ -53,6 +53,16 @@ func RegisterRoutes(r *gin.Engine, db *gorm.DB, hub *ws.Hub, agentHub *ws.AgentH
 		termHandler.HandleTerminal(c.Writer, c.Request, *server)
 	})
 
+	// 桌面实时查看 WebSocket（JWT 通过 query param 认证）
+	r.GET("/ws/screen/:id", func(c *gin.Context) {
+		server, err := termHandler.ValidateAndGetServer(c.Request, c.Param("id"))
+		if err != nil {
+			c.JSON(401, gin.H{"error": err.Error()})
+			return
+		}
+		termHandler.HandleScreen(c.Writer, c.Request, *server)
+	})
+
 	api := r.Group("/api")
 	api.Use(AuthMiddleware())
 

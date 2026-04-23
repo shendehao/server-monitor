@@ -89,6 +89,36 @@
         </div>
         <div ref="xtermRef" class="xterm-container"></div>
       </div>
+
+      <!-- 桌面查看器 -->
+      <div class="screen-section" v-if="detail?.connectMethod === 'agent' || detail?.connectMethod === 'plugin'">
+        <div class="screen-header">
+          <span class="section-title">桌面查看</span>
+          <span class="term-status" :class="screenStatus">{{ screenStatusText }}</span>
+          <div class="screen-controls" v-if="screenStatus === 'connected'">
+            <select v-model="screenFps" @change="updateScreenConfig" class="screen-select">
+              <option :value="1">1 FPS</option>
+              <option :value="2">2 FPS</option>
+              <option :value="3">3 FPS</option>
+              <option :value="5">5 FPS</option>
+            </select>
+            <select v-model="screenScale" @change="updateScreenConfig" class="screen-select">
+              <option :value="30">30%</option>
+              <option :value="50">50%</option>
+              <option :value="75">75%</option>
+              <option :value="100">100%</option>
+            </select>
+          </div>
+          <div class="term-actions">
+            <button class="term-btn" @click="connectScreen" v-if="screenStatus !== 'connected'">查看</button>
+            <button class="term-btn danger" @click="disconnectScreen" v-if="screenStatus === 'connected'">停止</button>
+          </div>
+        </div>
+        <div class="screen-viewer" v-if="screenStatus === 'connected' || screenFrame">
+          <img v-if="screenFrame" :src="'data:image/jpeg;base64,' + screenFrame" class="screen-img" />
+          <div v-else class="screen-placeholder">等待截图...</div>
+        </div>
+      </div>
     </template>
   </div>
 </template>
@@ -129,6 +159,14 @@ let fitAddon: FitAddon | null = null
 let termWs: WebSocket | null = null
 let resizeObserver: ResizeObserver | null = null
 let pipeMode = false // agent 管道模式下本地回显
+
+// 桌面查看器
+const screenStatus = ref<'disconnected' | 'connected'>('disconnected')
+const screenStatusText = computed(() => screenStatus.value === 'connected' ? '实时查看中' : '未连接')
+const screenFrame = ref('')
+const screenFps = ref(2)
+const screenScale = ref(50)
+let screenWs: WebSocket | null = null
 
 function initXterm() {
   if (!xtermRef.value || term) return
@@ -280,10 +318,56 @@ function disconnectTerminal() {
 
 function cleanupTerminal() {
   disconnectTerminal()
+  disconnectScreen()
   resizeObserver?.disconnect()
   term?.dispose()
   term = null
   fitAddon = null
+}
+
+function connectScreen() {
+  if (screenStatus.value === 'connected') return
+  const token = localStorage.getItem('token') || ''
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  const wsUrl = `${proto}://${location.host}/ws/screen/${route.params.id}?token=${token}`
+  screenWs = new WebSocket(wsUrl)
+  screenWs.onopen = () => { screenStatus.value = 'connected' }
+  screenWs.onmessage = (ev) => {
+    if (typeof ev.data === 'string') {
+      try {
+        const msg = JSON.parse(ev.data)
+        if (msg.data) screenFrame.value = msg.data
+      } catch {}
+    }
+  }
+  screenWs.onclose = () => {
+    screenStatus.value = 'disconnected'
+    screenWs = null
+  }
+  screenWs.onerror = () => {
+    screenStatus.value = 'disconnected'
+    screenWs = null
+  }
+}
+
+function disconnectScreen() {
+  if (screenWs) {
+    screenWs.close()
+    screenWs = null
+  }
+  screenStatus.value = 'disconnected'
+  screenFrame.value = ''
+}
+
+function updateScreenConfig() {
+  if (screenWs && screenWs.readyState === WebSocket.OPEN) {
+    screenWs.send(JSON.stringify({
+      type: 'config',
+      fps: screenFps.value,
+      quality: 50,
+      scale: screenScale.value,
+    }))
+  }
 }
 
 async function fetchDetail() {
@@ -632,6 +716,60 @@ onUnmounted(() => {
     background: rgba(255,255,255,0.1);
     border-radius: 3px;
   }
+}
+
+/* ===== 桌面查看器 ===== */
+.screen-section {
+  margin-top: 16px;
+  background: var(--card-bg);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.screen-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.screen-controls {
+  display: flex;
+  gap: 6px;
+}
+
+.screen-select {
+  padding: 2px 6px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--t2);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.screen-viewer {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #0b0e17;
+  min-height: 200px;
+  padding: 8px;
+}
+
+.screen-img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  image-rendering: auto;
+}
+
+.screen-placeholder {
+  color: var(--t3);
+  font-size: 12px;
 }
 
 /* ===== 移动端适配 ===== */
