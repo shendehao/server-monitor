@@ -7,13 +7,21 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
+// hiddenExec 静默执行 PowerShell 命令，不弹出任何窗口
+func hiddenExec(args ...string) ([]byte, error) {
+	cmd := exec.Command("powershell", args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	return cmd.Output()
+}
+
 func getCPUUsage() (float64, error) {
 	// 使用 PowerShell 获取 CPU 使用率
-	out, err := exec.Command("powershell", "-NoProfile", "-Command",
-		"(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average").Output()
+	out, err := hiddenExec("-NoProfile", "-Command",
+		"(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average")
 	if err != nil {
 		return 0, err
 	}
@@ -26,16 +34,16 @@ func getCPUUsage() (float64, error) {
 
 func getMemory() (total, used int64, usage float64) {
 	// 获取总内存 (MB)
-	outTotal, err := exec.Command("powershell", "-NoProfile", "-Command",
-		"[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)").Output()
+	outTotal, err := hiddenExec("-NoProfile", "-Command",
+		"[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)")
 	if err != nil {
 		return
 	}
 	total, _ = strconv.ParseInt(strings.TrimSpace(string(outTotal)), 10, 64)
 
 	// 获取可用内存 (MB)
-	outFree, err := exec.Command("powershell", "-NoProfile", "-Command",
-		"[math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1KB)").Output()
+	outFree, err := hiddenExec("-NoProfile", "-Command",
+		"[math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1KB)")
 	if err != nil {
 		return
 	}
@@ -50,8 +58,8 @@ func getMemory() (total, used int64, usage float64) {
 
 func getDisk() (total, used int64, usage float64) {
 	// 获取所有固定磁盘的容量和可用空间
-	out, err := exec.Command("powershell", "-NoProfile", "-Command",
-		"Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object { $_.Size,$_.FreeSpace } | ForEach-Object { [math]::Round($_ / 1GB) }").Output()
+	out, err := hiddenExec("-NoProfile", "-Command",
+		"Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object { $_.Size,$_.FreeSpace } | ForEach-Object { [math]::Round($_ / 1GB) }")
 	if err != nil {
 		return
 	}
@@ -71,8 +79,8 @@ func getDisk() (total, used int64, usage float64) {
 
 func getLoadAvg() (l1, l5, l15 float64) {
 	// Windows 没有 load average，用 CPU 队列长度近似
-	out, err := exec.Command("powershell", "-NoProfile", "-Command",
-		"(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average").Output()
+	out, err := hiddenExec("-NoProfile", "-Command",
+		"(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average")
 	if err != nil {
 		return
 	}
@@ -85,8 +93,8 @@ func getLoadAvg() (l1, l5, l15 float64) {
 }
 
 func getProcessCount() int {
-	out, err := exec.Command("powershell", "-NoProfile", "-Command",
-		"(Get-Process).Count").Output()
+	out, err := hiddenExec("-NoProfile", "-Command",
+		"(Get-Process).Count")
 	if err != nil {
 		return 0
 	}
@@ -95,8 +103,8 @@ func getProcessCount() int {
 }
 
 func getUptime() string {
-	out, err := exec.Command("powershell", "-NoProfile", "-Command",
-		"((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds").Output()
+	out, err := hiddenExec("-NoProfile", "-Command",
+		"((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds")
 	if err != nil {
 		return ""
 	}
@@ -116,7 +124,7 @@ func getNetTraffic() (rxPerSec, txPerSec int64) {
 		`$tx2=($b | Measure-Object -Property BytesSentPersec -Sum).Sum;` +
 		`"$($rx2-$rx),$($tx2-$tx)"`
 
-	out, err := exec.Command("powershell", "-NoProfile", "-Command", cmd).Output()
+	out, err := hiddenExec("-NoProfile", "-Command", cmd)
 	if err != nil {
 		return
 	}
