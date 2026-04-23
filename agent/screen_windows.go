@@ -98,6 +98,7 @@ func screenCaptureLoop(session *ScreenSession, cfg ScreenStartPayload) {
 
 	var lastHash uint64 = 0xFFFFFFFFFFFFFFFF // 哨兵值，确保第一帧一定发送
 	var jpegBuf bytes.Buffer
+	var errCount int
 
 	for {
 		select {
@@ -107,9 +108,15 @@ func screenCaptureLoop(session *ScreenSession, cfg ScreenStartPayload) {
 			jpegBuf.Reset()
 			w, h, hash, err := captureScreenBinary(&jpegBuf, cfg.Quality, cfg.Scale)
 			if err != nil {
+				errCount++
 				log.Printf("截图失败: %v", err)
+				// 前3次错误发送到前端显示
+				if errCount <= 3 {
+					sendScreenError(session, fmt.Sprintf("截图失败: %v", err))
+				}
 				continue
 			}
+			errCount = 0
 			// 画面没变化，跳过
 			if hash == lastHash {
 				continue
@@ -118,6 +125,21 @@ func screenCaptureLoop(session *ScreenSession, cfg ScreenStartPayload) {
 			sendScreenFrameBinary(session, jpegBuf.Bytes(), w, h)
 		}
 	}
+}
+
+// sendScreenError 发送截图错误信息到前端
+func sendScreenError(session *ScreenSession, errMsg string) {
+	msg, _ := json.Marshal(AgentMessage{
+		Type: "screen_error",
+		ID:   session.id,
+		Payload: func() json.RawMessage {
+			p, _ := json.Marshal(map[string]string{"error": errMsg})
+			return p
+		}(),
+	})
+	session.writeMu.Lock()
+	session.conn.WriteMessage(websocket.TextMessage, msg)
+	session.writeMu.Unlock()
 }
 
 // captureScreenBinary 截图并直接输出 JPEG 到缓冲区，返回尺寸和哈希

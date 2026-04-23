@@ -561,6 +561,18 @@ func (a *AgentConn) readPump() {
 			}
 			a.screenSessionsMu.Unlock()
 
+		case "screen_error":
+			a.screenSessionsMu.Lock()
+			if ss, ok := a.screenSessions[msg.ID]; ok && ss.OnFrame != nil {
+				// 转发错误消息到前端
+				errPayload, _ := json.Marshal(map[string]interface{}{
+					"type":  "screen_error",
+					"error": string(msg.Payload),
+				})
+				ss.OnFrame(errPayload)
+			}
+			a.screenSessionsMu.Unlock()
+
 		case "stress_progress":
 			a.stressSessionsMu.Lock()
 			if ss, ok := a.stressSessions[msg.ID]; ok {

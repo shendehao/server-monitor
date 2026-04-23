@@ -5,8 +5,10 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strings"
 	"syscall"
 )
@@ -110,9 +112,9 @@ func runPS(script string) error {
 }
 
 func getSelfPath() (string, error) {
-	p, err := exec.LookPath("agent-windows.exe")
+	p, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	return p, nil
+	return filepath.EvalSymlinks(p)
 }

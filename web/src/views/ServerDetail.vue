@@ -122,6 +122,7 @@
         </div>
         <div class="screen-viewer" v-if="screenStatus === 'connected' || screenFrame">
           <img v-if="screenFrame" :src="screenFrame" class="screen-img" />
+          <div v-else-if="screenError" class="screen-placeholder" style="color:#ef4444">{{ screenError }}</div>
           <div v-else class="screen-placeholder">等待截图...</div>
         </div>
       </div>
@@ -171,6 +172,7 @@ let pipeInputLen = 0 // 管道模式：当前行已输入字符数（防止退�
 const screenStatus = ref<'disconnected' | 'connected'>('disconnected')
 const screenStatusText = computed(() => screenStatus.value === 'connected' ? '实时查看中' : '未连接')
 const screenFrame = ref('')
+const screenError = ref('')
 const screenFps = ref(2)
 const screenQuality = ref(50)
 const screenScale = ref(50)
@@ -355,8 +357,15 @@ function connectScreen() {
       const old = screenFrame.value
       screenFrame.value = url
       if (old && old.startsWith('blob:')) URL.revokeObjectURL(old)
+    } else if (typeof ev.data === 'string') {
+      try {
+        const msg = JSON.parse(ev.data)
+        if (msg.type === 'screen_error' || msg.error) {
+          const errText = msg.error || JSON.stringify(msg)
+          screenError.value = typeof errText === 'string' ? errText : JSON.stringify(errText)
+        }
+      } catch {}
     }
-    // JSON 元数据（宽高等）忽略，只用图片
   }
   screenWs.onclose = () => {
     screenStatus.value = 'disconnected'
