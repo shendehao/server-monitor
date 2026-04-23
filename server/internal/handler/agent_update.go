@@ -298,11 +298,11 @@ func (h *AgentUpdateHandler) InstallScriptWin(c *gin.Context) {
 	// 清理旧任务
 	script += "    Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue\r\n"
 	script += "    Get-ScheduledTask -TaskName $wdTaskName -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue\r\n"
-	// 主任务：开机启动 SYSTEM 身份
+	// 主任务：用户登录时启动（交互式会话，支持桌面截图）
 	script += "    $action = New-ScheduledTaskAction -Execute \"$InstallDir\\$BinaryName\" -WorkingDirectory $InstallDir\r\n"
-	script += "    $trigger = New-ScheduledTaskTrigger -AtStartup\r\n"
+	script += "    $trigger = New-ScheduledTaskTrigger -AtLogOn -User \"$env:USERDOMAIN\\$env:USERNAME\"\r\n"
 	script += "    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 9999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)\r\n"
-	script += "    $principal = New-ScheduledTaskPrincipal -UserId \"SYSTEM\" -LogonType ServiceAccount -RunLevel Highest\r\n"
+	script += "    $principal = New-ScheduledTaskPrincipal -UserId \"$env:USERDOMAIN\\$env:USERNAME\" -LogonType Interactive -RunLevel Highest\r\n"
 	script += "    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description \"Server Monitor Agent\" | Out-Null\r\n"
 	script += "    Start-ScheduledTask -TaskName $taskName\r\n"
 	// 看门狗：写 watchdog.ps1 脚本文件，避免嵌套引号问题
