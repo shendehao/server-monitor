@@ -3,22 +3,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
-	"os"
-	"os/exec"
 	"sync"
 
+	"github.com/UserExistsError/conpty"
 	"github.com/gorilla/websocket"
 )
 
-// Windows 使用管道式终端（PowerShell）
+// Windows 使用 ConPTY（真正的伪终端），支持退格/删除/箭头键/Tab补全/resize
 
 type PtySession struct {
 	id      string
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
+	cpty    *conpty.ConPty
 	conn    *websocket.Conn
 	writeMu *sync.Mutex
 	done    chan struct{}
@@ -57,35 +56,24 @@ func handlePtyStart(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage)
 	var payload PtyStartPayload
 	json.Unmarshal(msg.Payload, &payload)
 
-	cmd := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NoExit")
-	cmd.Env = os.Environ()
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		log.Printf("PTY stdin 管道失败: %v", err)
-		sendPtyExit(conn, writeMu, msg.ID, -1)
-		return
+	if payload.Cols <= 0 {
+		payload.Cols = 120
+	}
+	if payload.Rows <= 0 {
+		payload.Rows = 30
 	}
 
-	stdout, err := cmd.StdoutPipe()
+	// 使用 ConPTY 启动 PowerShell
+	cpty, err := conpty.Start("powershell.exe -NoLogo -NoProfile", conpty.ConPtyDimensions(payload.Cols, payload.Rows))
 	if err != nil {
-		log.Printf("PTY stdout 管道失败: %v", err)
-		sendPtyExit(conn, writeMu, msg.ID, -1)
-		return
-	}
-
-	cmd.Stderr = cmd.Stdout
-
-	if err := cmd.Start(); err != nil {
-		log.Printf("PTY 启动失败: %v", err)
+		log.Printf("ConPTY 启动失败: %v", err)
 		sendPtyExit(conn, writeMu, msg.ID, -1)
 		return
 	}
 
 	session := &PtySession{
 		id:      msg.ID,
-		cmd:     cmd,
-		stdin:   stdin,
+		cpty:    cpty,
 		conn:    conn,
 		writeMu: writeMu,
 		done:    make(chan struct{}),
@@ -95,36 +83,31 @@ func handlePtyStart(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage)
 	ptyManager.sessions[msg.ID] = session
 	ptyManager.mu.Unlock()
 
-	log.Printf("PTY 会话已启动: id=%s, shell=powershell.exe", msg.ID)
+	log.Printf("ConPTY 会话已启动: id=%s", msg.ID)
 
-	// stdout → WebSocket
+	// ConPTY output → WebSocket
 	go func() {
 		defer func() {
 			close(session.done)
 
-			exitCode := 0
-			if err := cmd.Wait(); err != nil {
-				if exitErr, ok := err.(*exec.ExitError); ok {
-					exitCode = exitErr.ExitCode()
-				} else {
-					exitCode = -1
-				}
-			}
+			code, _ := cpty.Wait(context.Background())
+			exitCode := int(code)
+			cpty.Close()
 
 			ptyManager.mu.Lock()
 			delete(ptyManager.sessions, msg.ID)
 			ptyManager.mu.Unlock()
 
 			sendPtyExit(conn, writeMu, msg.ID, exitCode)
-			log.Printf("PTY 会话已结束: id=%s, exitCode=%d", msg.ID, exitCode)
+			log.Printf("ConPTY 会话已结束: id=%s, exitCode=%d", msg.ID, exitCode)
 		}()
 
 		buf := make([]byte, 8192)
 		for {
-			n, err := stdout.Read(buf)
+			n, err := cpty.Read(buf)
 			if err != nil {
 				if err != io.EOF {
-					log.Printf("PTY 读取错误: %v", err)
+					log.Printf("ConPTY 读取错误: %v", err)
 				}
 				return
 			}
@@ -151,13 +134,22 @@ func handlePtyInput(msg AgentMessage) {
 	session, ok := ptyManager.sessions[msg.ID]
 	ptyManager.mu.Unlock()
 
-	if ok && session.stdin != nil {
-		session.stdin.Write([]byte(payload.Data))
+	if ok && session.cpty != nil {
+		session.cpty.Write([]byte(payload.Data))
 	}
 }
 
 func handlePtyResize(msg AgentMessage) {
-	// Windows 管道模式不支持 resize，忽略
+	var payload PtyResizePayload
+	json.Unmarshal(msg.Payload, &payload)
+
+	ptyManager.mu.Lock()
+	session, ok := ptyManager.sessions[msg.ID]
+	ptyManager.mu.Unlock()
+
+	if ok && session.cpty != nil && payload.Cols > 0 && payload.Rows > 0 {
+		session.cpty.Resize(payload.Cols, payload.Rows)
+	}
 }
 
 func handlePtyClose(msg AgentMessage) {
@@ -165,13 +157,8 @@ func handlePtyClose(msg AgentMessage) {
 	session, ok := ptyManager.sessions[msg.ID]
 	ptyManager.mu.Unlock()
 
-	if ok {
-		if session.stdin != nil {
-			session.stdin.Close()
-		}
-		if session.cmd != nil && session.cmd.Process != nil {
-			session.cmd.Process.Kill()
-		}
+	if ok && session.cpty != nil {
+		session.cpty.Close()
 	}
 }
 
@@ -196,11 +183,8 @@ func cleanupAllPtySessions() {
 	ptyManager.mu.Unlock()
 
 	for _, s := range sessions {
-		if s.stdin != nil {
-			s.stdin.Close()
-		}
-		if s.cmd != nil && s.cmd.Process != nil {
-			s.cmd.Process.Kill()
+		if s.cpty != nil {
+			s.cpty.Close()
 		}
 	}
 }

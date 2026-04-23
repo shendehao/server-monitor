@@ -8,6 +8,7 @@ import (
 	"server-monitor/internal/model"
 	"server-monitor/internal/ws"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -69,15 +70,20 @@ func (h *TerminalHandler) handleAgentTerminal(wsConn *gorillaws.Conn, server mod
 	}
 
 	done := make(chan struct{})
+	var wsMu sync.Mutex // 保护 wsConn 并发写
 
 	// 注册终端会话回调
 	ts := &ws.TermSession{
 		OnOutput: func(data string) {
+			wsMu.Lock()
 			wsConn.WriteMessage(gorillaws.TextMessage, []byte(data))
+			wsMu.Unlock()
 		},
 		OnExit: func(code int) {
 			msg := fmt.Sprintf("\r\n\033[33m终端已退出 (code: %d)\033[0m\r\n", code)
+			wsMu.Lock()
 			wsConn.WriteMessage(gorillaws.TextMessage, []byte(msg))
+			wsMu.Unlock()
 			select {
 			case <-done:
 			default:

@@ -100,6 +100,7 @@ import * as echarts from 'echarts'
 import { serverApi, metricApi } from '@/api'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { ClipboardAddon } from '@xterm/addon-clipboard'
 import '@xterm/xterm/css/xterm.css'
 
 const route = useRoute()
@@ -166,6 +167,7 @@ function initXterm() {
 
   fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
+  term.loadAddon(new ClipboardAddon())
   term.open(xtermRef.value)
   fitAddon.fit()
 
@@ -174,6 +176,17 @@ function initXterm() {
     if (termWs && termWs.readyState === WebSocket.OPEN) {
       termWs.send(data)
     }
+  })
+
+  // 右键粘贴
+  xtermRef.value.addEventListener('contextmenu', async (e: MouseEvent) => {
+    e.preventDefault()
+    try {
+      const text = await navigator.clipboard.readText()
+      if (text && termWs && termWs.readyState === WebSocket.OPEN) {
+        termWs.send(text)
+      }
+    } catch {}
   })
 
   // 自动调整大小
