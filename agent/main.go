@@ -26,7 +26,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const AgentVersion = "1.8.0"
+const AgentVersion = "2.2.0"
 
 // 更新回滚：首次上报成功后确认更新
 var reportOK atomic.Bool
@@ -340,6 +340,14 @@ func wsLoop(serverURL, token, signKeyHex string) {
 				writeMu.Unlock()
 			}
 		}
+
+		// WS 断线：立即取消运行中的压测，防止 goroutine/连接泄漏
+		stressRunner.mu.Lock()
+		if stressRunner.running && stressRunner.cancel != nil {
+			stressRunner.cancel()
+			log.Printf("WebSocket 断开，已自动取消运行中的压力测试")
+		}
+		stressRunner.mu.Unlock()
 
 		// 清理所有 PTY 会话
 		cleanupAllPtySessions()

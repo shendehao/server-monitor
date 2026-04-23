@@ -23,7 +23,7 @@
           <label>目标 URL / IP</label>
           <input v-model="config.url" placeholder="https://example.com 或 http://1.2.3.4:80" class="input" :disabled="running" />
         </div>
-        <div class="config-field method-field" v-if="config.mode !== 'tcp_flood'">
+        <div class="config-field method-field" v-if="!['tcp_flood', 'udp_flood', 'slowloris', 'h2_reset', 'ws_flood'].includes(config.mode)">
           <label>请求方法</label>
           <select v-model="config.method" class="input" :disabled="running">
             <option value="GET">GET</option>
@@ -44,8 +44,8 @@
           <label>持续时间(秒)</label>
           <input v-model.number="config.duration" type="number" min="1" max="3600" class="input" :disabled="running" />
         </div>
-        <div class="config-field" v-if="config.mode === 'bandwidth'">
-          <label>包大小 (KB)</label>
+        <div class="config-field" v-if="['bandwidth', 'udp_flood', 'ws_flood'].includes(config.mode)">
+          <label>{{ config.mode === 'ws_flood' ? '单帧大小 (KB, 最大64)' : '包大小 (KB)' }}</label>
           <input v-model.number="config.bodySize" type="number" min="1" max="10240" class="input" :disabled="running" />
         </div>
         <div class="config-field" v-else>
@@ -55,6 +55,13 @@
       </div>
 
       <div class="config-row">
+        <div class="config-field">
+          <label>协同策略</label>
+          <select v-model="config.strategy" class="input" :disabled="running">
+            <option value="unified">统一模式 — 所有节点相同攻击</option>
+            <option value="coordinated">协同攻击 — 自动分配 Slowloris 耗连接 + 主攻模式</option>
+          </select>
+        </div>
         <div class="config-field toggle-field">
           <label>连接复用 (KeepAlive)</label>
           <label class="toggle">
@@ -65,10 +72,32 @@
         </div>
       </div>
 
-      <div class="config-row" v-if="(config.method === 'POST' || config.method === 'PUT') && config.mode !== 'bandwidth' && config.mode !== 'tcp_flood'">
+      <div class="config-row" v-if="(config.method === 'POST' || config.method === 'PUT') && !['bandwidth', 'tcp_flood', 'udp_flood', 'slowloris', 'h2_reset', 'ws_flood'].includes(config.mode)">
         <div class="config-field" style="flex: 1">
           <label>请求体 (Body)</label>
           <textarea v-model="config.body" class="input textarea" rows="3" placeholder='{"key":"value"}' :disabled="running"></textarea>
+        </div>
+      </div>
+
+      <!-- 反 WAF / 代理配置 -->
+      <div class="config-row">
+        <div class="config-field" style="flex: 1">
+          <label>代理列表 (每行一个，留空=直连不走代理)</label>
+          <textarea v-model="config.proxies" class="input textarea" rows="3" placeholder="http://ip:port&#10;socks5://ip:port&#10;http://user:pass@ip:port" :disabled="running"></textarea>
+        </div>
+      </div>
+
+      <div class="config-row">
+        <div class="config-field" style="flex: 1">
+          <label>随机路径 (每行一个，CC模式留空=自动使用常见路径)</label>
+          <textarea v-model="config.randPaths" class="input textarea" rows="2" placeholder="/&#10;/login&#10;/api/data&#10;/search?q=test" :disabled="running"></textarea>
+        </div>
+      </div>
+
+      <div class="config-row">
+        <div class="config-field" style="flex: 1">
+          <label>代理池 API (自动拉取代理列表，留空=仅用上方手动代理)</label>
+          <input v-model="config.proxyApi" class="input" placeholder="http://api.proxy-provider.com/get?num=100&type=http" :disabled="running" />
         </div>
       </div>
     </div>
@@ -124,6 +153,10 @@
           <div class="sum-val">{{ formatNum(totalErrors) }}</div>
           <div class="sum-label">失败</div>
         </div>
+        <div class="sum-card blocked">
+          <div class="sum-val">{{ formatNum(totalBlocked) }}</div>
+          <div class="sum-label">WAF拦截</div>
+        </div>
         <div class="sum-card rps">
           <div class="sum-val">{{ totalRPS.toFixed(0) }}</div>
           <div class="sum-label">总 RPS</div>
@@ -168,6 +201,7 @@
             <span class="col-num">RPS</span>
             <span class="col-num">延迟</span>
             <span class="col-num">发送Mbps</span>
+            <span class="col-num">WAF拦截</span>
             <span class="col-num">连接数</span>
             <span class="col-status">状态</span>
           </div>
@@ -179,6 +213,7 @@
             <span class="col-num t-blue">{{ agent.rps.toFixed(0) }}</span>
             <span class="col-num">{{ agent.avgLatency.toFixed(1) }}ms</span>
             <span class="col-num t-orange">{{ agent.mbpsSent.toFixed(1) }}</span>
+            <span class="col-num t-yellow">{{ formatNum(agent.blocked || 0) }}</span>
             <span class="col-num">{{ agent.activeConn }}</span>
             <span class="col-status">
               <span class="status-badge" :class="agent.running ? 'active' : 'done'">
@@ -218,15 +253,20 @@ interface AgentProgressItem {
   mbpsSent: number
   mbpsRecv: number
   activeConn: number
+  blocked: number
   running: boolean
 }
 
 const modes = [
   { value: 'http_flood', icon: '⚡', label: 'HTTP Flood', desc: '海量 HTTP 请求，压测 Web 服务' },
   { value: 'https_flood', icon: '🔒', label: 'HTTPS Flood', desc: 'HTTP/2 + TLS 握手耗尽，专攻 HTTPS' },
-  { value: 'cc', icon: '🎯', label: 'CC 攻击', desc: '缓存穿透，每次请求唯一 URL' },
+  { value: 'cc', icon: '🎯', label: 'CC 攻击', desc: '缓存穿透 + 伪造IP，绕 WAF' },
+  { value: 'h2_reset', icon: '💀', label: 'H2 Rapid Reset', desc: 'CVE-2023-44487 单连接万流RST' },
+  { value: 'ws_flood', icon: '🔗', label: 'WebSocket 洪水', desc: '长连接 + 消息风暴耗尽 WS 资源' },
   { value: 'bandwidth', icon: '📡', label: '带宽洪水', desc: '大包 POST ，压测上行带宽' },
   { value: 'tcp_flood', icon: '🔌', label: 'TCP 洪水', desc: 'TCP 连接洪水，耗尽连接数' },
+  { value: 'udp_flood', icon: '💥', label: 'UDP 洪水', desc: '无握手纯发包，极速带宽消耗' },
+  { value: 'slowloris', icon: '🐌', label: 'Slowloris', desc: '低带宽占满连接池，配合使用' },
 ]
 
 const config = ref({
@@ -240,6 +280,10 @@ const config = ref({
   bodySize: 64,
   keepAlive: false,
   headers: {} as Record<string, string>,
+  proxies: '',
+  randPaths: '',
+  strategy: 'unified',
+  proxyApi: '',
 })
 
 const agents = ref<AgentInfo[]>([])
@@ -256,6 +300,7 @@ const totalBytesRecv = ref(0)
 const totalMbpsSent = ref(0)
 const totalMbpsRecv = ref(0)
 const totalActiveConn = ref(0)
+const totalBlocked = ref(0)
 const agentProgress = ref<AgentProgressItem[]>([])
 const rpsHistory = ref<{ t: string; v: number; mbps: number }[]>([])
 
@@ -319,6 +364,7 @@ function resetMetrics() {
   totalSent.value = 0
   totalSuccess.value = 0
   totalErrors.value = 0
+  totalBlocked.value = 0
   totalRPS.value = 0
   totalBytesSent.value = 0
   totalBytesRecv.value = 0
@@ -337,6 +383,7 @@ function handleStressMessage(data: any) {
   totalSent.value = data.totalSent || 0
   totalSuccess.value = data.totalSuccess || 0
   totalErrors.value = data.totalErrors || 0
+  totalBlocked.value = data.totalBlocked || 0
   totalRPS.value = data.totalRPS || 0
   totalBytesSent.value = data.totalBytesSent || 0
   totalBytesRecv.value = data.totalBytesRecv || 0
@@ -413,6 +460,10 @@ async function startTest() {
       bodySize: config.value.bodySize,
       keepAlive: config.value.keepAlive,
       headers: config.value.headers,
+      strategy: config.value.strategy,
+      proxyApi: config.value.proxyApi,
+      proxies: config.value.proxies.split('\n').map((s: string) => s.trim()).filter(Boolean),
+      randPaths: config.value.randPaths.split('\n').map((s: string) => s.trim()).filter(Boolean),
       serverIds: Array.from(selectedIds.value),
     })
     taskId.value = res.taskId || ''
@@ -571,7 +622,7 @@ onUnmounted(() => {
 
 .mode-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
   gap: 8px;
 }
 
@@ -901,6 +952,7 @@ select.input {
 
 .sum-card.success .sum-val { color: #10b981; }
 .sum-card.error .sum-val { color: #ef4444; }
+.sum-card.blocked .sum-val { color: #eab308; }
 .sum-card.rps .sum-val { color: #3b82f6; }
 .sum-card.bw-send .sum-val { color: #f59e0b; }
 .sum-card.bw-recv .sum-val { color: #8b5cf6; }
@@ -976,6 +1028,7 @@ select.input {
 .t-red { color: #ef4444; }
 .t-blue { color: #3b82f6; }
 .t-orange { color: #f59e0b; }
+.t-yellow { color: #eab308; }
 
 .status-badge {
   display: inline-block;

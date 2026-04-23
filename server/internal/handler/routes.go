@@ -121,7 +121,7 @@ func RegisterRoutes(r *gin.Engine, db *gorm.DB, hub *ws.Hub, agentHub *ws.AgentH
 				"collectInterval": 10,
 				"sshTimeout":      5,
 				"retryCount":      2,
-				"version":         "1.0.0",
+				"version":         "2.2.0",
 			},
 		})
 	})

