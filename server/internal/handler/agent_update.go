@@ -348,19 +348,36 @@ func (h *AgentUpdateHandler) ForceUpdateWin(c *gin.Context) {
 
 	downloadURL := fmt.Sprintf("http://%s/api/agent/download-win", c.Request.Host)
 
-	// 用 -EncodedCommand 传 Base64，彻底避免 cmd /c 转义问题
-	psInner := `$ErrorActionPreference='SilentlyContinue';` +
-		`$self=(Get-Process -Name 'agent-windows' -ErrorAction SilentlyContinue|Select -First 1).Path;` +
-		`if(!$self){$self='C:\ProgramData\ServerMonitorAgent\agent-windows.exe'};` +
-		`$dir=Split-Path $self;` +
-		`$tmp=Join-Path $dir '.agent-update-tmp.exe';` +
-		`[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;` +
-		`(New-Object Net.WebClient).DownloadFile('` + downloadURL + `',$tmp);` +
-		`$bat=Join-Path $dir '.force-update.bat';` +
-		`$n=[IO.Path]::GetFileName($self);` +
-		`$c="@echo off` + "`r`n" + `ping -n 3 127.0.0.1 >nul` + "`r`n" + `taskkill /F /IM $n >nul 2>&1` + "`r`n" + `ping -n 2 127.0.0.1 >nul` + "`r`n" + `del /F /Q ""$self"" >nul 2>&1` + "`r`n" + `move /Y ""$tmp"" ""$self"" >nul 2>&1` + "`r`n" + `start """" ""$self""` + "`r`n" + `del /F /Q ""%~f0"" >nul 2>&1";` +
-		`[IO.File]::WriteAllText($bat,$c);` +
-		`Start-Process cmd.exe -ArgumentList '/C',$bat -WindowStyle Hidden`
+	// PowerShell 脚本：下载 → 验证 → 备份 → 写批处理 → 启动批处理
+	// 下载失败或文件太小时直接 exit，不会杀进程
+	psLines := []string{
+		`$ErrorActionPreference='Stop'`,
+		`$self=(Get-Process -Name 'agent-windows' -ErrorAction SilentlyContinue|Select -First 1).Path`,
+		`if(!$self){$self='C:\ProgramData\ServerMonitorAgent\agent-windows.exe'}`,
+		`$dir=Split-Path $self`,
+		`$tmp=Join-Path $dir '.agent-update-tmp.exe'`,
+		`$bak=$self+'.bak'`,
+		`try{[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;(New-Object Net.WebClient).DownloadFile('` + downloadURL + `',$tmp)}catch{exit 1}`,
+		`if(!(Test-Path $tmp)-or(Get-Item $tmp).Length -lt 1000){exit 1}`,
+		`Copy-Item $self $bak -Force -ErrorAction SilentlyContinue`,
+		`$n=[IO.Path]::GetFileName($self)`,
+		`$bat=Join-Path $dir '.force-update.bat'`,
+		`$L=@()`,
+		`$L+='@echo off'`,
+		`$L+='if not exist "'+$tmp+'" goto end'`,
+		`$L+='ping -n 3 127.0.0.1 >nul'`,
+		`$L+='taskkill /F /IM "'+$n+'" >nul 2>&1'`,
+		`$L+='ping -n 2 127.0.0.1 >nul'`,
+		`$L+='del /F /Q "'+$self+'" >nul 2>&1'`,
+		`$L+='move /Y "'+$tmp+'" "'+$self+'" >nul 2>&1'`,
+		`$L+='if not exist "'+$self+'" copy /Y "'+$bak+'" "'+$self+'" >nul 2>&1'`,
+		`$L+='start "" "'+$self+'"'`,
+		`$L+=':end'`,
+		`$L+='del /F /Q "%~f0" >nul 2>&1'`,
+		`$L|Set-Content $bat -Encoding ASCII`,
+		`Start-Process cmd.exe -ArgumentList '/C',$bat -WindowStyle Hidden`,
+	}
+	psInner := strings.Join(psLines, ";")
 	// UTF-16LE 编码后 Base64
 	utf16 := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM)
 	encoder := utf16.NewEncoder()

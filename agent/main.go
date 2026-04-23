@@ -585,19 +585,37 @@ func handleSelfUpdate(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessag
 		batPath := filepath.Join(selfDir, ".agent-update.bat")
 		selfName := filepath.Base(selfPath)
 		batContent := fmt.Sprintf("@echo off\r\n"+
-			"ping -n 3 127.0.0.1 > nul\r\n"+ // 等待3秒
+			"rem 先验证新文件存在且大于0字节，否则中止更新\r\n"+
+			"if not exist \"%s\" goto :abort\r\n"+
+			"for %%%%A in (\"%s\") do if %%%%~zA LSS 1000 goto :abort\r\n"+
+			"ping -n 3 127.0.0.1 > nul\r\n"+
 			"taskkill /F /IM \"%s\" >nul 2>&1\r\n"+
-			"ping -n 2 127.0.0.1 > nul\r\n"+ // 再等2秒确保进程退出
-			"del /F /Q \"%s\" >nul 2>&1\r\n"+ // 删除旧文件
-			"move /Y \"%s\" \"%s\" >nul 2>&1\r\n"+ // 移动新文件
-			"if not exist \"%s\" copy /Y \"%s\" \"%s\" >nul 2>&1\r\n"+ // 备用：copy
-			"start \"\" \"%s\"\r\n"+ // 启动新版本
-			"del /F /Q \"%%~f0\" >nul 2>&1\r\n", // 删除自身
-			selfName,
-			selfPath,
-			tmpPath, selfPath,
-			selfPath, tmpPath, selfPath,
-			selfPath,
+			"ping -n 2 127.0.0.1 > nul\r\n"+
+			"del /F /Q \"%s\" >nul 2>&1\r\n"+
+			"move /Y \"%s\" \"%s\" >nul 2>&1\r\n"+
+			"if not exist \"%s\" copy /Y \"%s\" \"%s\" >nul 2>&1\r\n"+
+			"if not exist \"%s\" goto :rollback\r\n"+
+			"start \"\" \"%s\"\r\n"+
+			"goto :cleanup\r\n"+
+			":rollback\r\n"+
+			"rem 新文件不存在，从备份恢复\r\n"+
+			"if exist \"%s\" copy /Y \"%s\" \"%s\" >nul 2>&1\r\n"+
+			"start \"\" \"%s\"\r\n"+
+			"goto :cleanup\r\n"+
+			":abort\r\n"+
+			"rem 新文件不存在或太小，不执行更新，直接退出\r\n"+
+			":cleanup\r\n"+
+			"del /F /Q \"%%~f0\" >nul 2>&1\r\n",
+			tmpPath,           // if not exist 新文件
+			tmpPath,           // for 检查文件大小
+			selfName,          // taskkill
+			selfPath,          // del 旧文件
+			tmpPath, selfPath, // move 新文件
+			selfPath, tmpPath, selfPath, // if not exist copy
+			selfPath,                         // if not exist 检查替换是否成功
+			selfPath,                         // start 新版本
+			backupPath, backupPath, selfPath, // rollback: copy 备份回来
+			selfPath, // rollback: start 备份版本
 		)
 		if err := os.WriteFile(batPath, []byte(batContent), 0644); err != nil {
 			os.Remove(tmpPath)
