@@ -7,20 +7,25 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"os"
+	"os/exec"
 	"sync"
 
 	"github.com/UserExistsError/conpty"
 	"github.com/gorilla/websocket"
 )
 
-// Windows 使用 ConPTY（真正的伪终端），支持退格/删除/箭头键/Tab补全/resize
+// Windows 终端：ConPTY 优先，不可用时自动降级为管道模式
 
 type PtySession struct {
 	id      string
-	cpty    *conpty.ConPty
+	cpty    *conpty.ConPty // ConPTY 模式
+	cmd     *exec.Cmd      // 管道模式
+	stdin   io.WriteCloser
 	conn    *websocket.Conn
 	writeMu *sync.Mutex
 	done    chan struct{}
+	isPipe  bool // true = 管道降级模式
 }
 
 type PtyStartPayload struct {
@@ -63,64 +68,125 @@ func handlePtyStart(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage)
 		payload.Rows = 30
 	}
 
-	// 使用 ConPTY 启动 PowerShell
-	cpty, err := conpty.Start("powershell.exe -NoLogo -NoProfile", conpty.ConPtyDimensions(payload.Cols, payload.Rows))
+	// 优先尝试 ConPTY
+	if conpty.IsConPtyAvailable() {
+		cpty, err := conpty.Start("powershell.exe -NoLogo -NoProfile", conpty.ConPtyDimensions(payload.Cols, payload.Rows))
+		if err == nil {
+			session := &PtySession{
+				id: msg.ID, cpty: cpty, conn: conn, writeMu: writeMu,
+				done: make(chan struct{}), isPipe: false,
+			}
+			ptyManager.mu.Lock()
+			ptyManager.sessions[msg.ID] = session
+			ptyManager.mu.Unlock()
+			log.Printf("ConPTY 会话已启动: id=%s", msg.ID)
+			go readConPTY(session, cpty, conn, writeMu, msg.ID)
+			return
+		}
+		log.Printf("ConPTY 启动失败，降级管道模式: %v", err)
+	}
+
+	// 降级：管道模式
+	startPipeMode(conn, writeMu, msg)
+}
+
+// readConPTY 读取 ConPTY 输出并转发到 WebSocket
+func readConPTY(session *PtySession, cpty *conpty.ConPty, conn *websocket.Conn, writeMu *sync.Mutex, sessionID string) {
+	defer func() {
+		close(session.done)
+		code, _ := cpty.Wait(context.Background())
+		exitCode := int(code)
+		cpty.Close()
+
+		ptyManager.mu.Lock()
+		delete(ptyManager.sessions, sessionID)
+		ptyManager.mu.Unlock()
+
+		sendPtyExit(conn, writeMu, sessionID, exitCode)
+		log.Printf("ConPTY 会话已结束: id=%s, exitCode=%d", sessionID, exitCode)
+	}()
+
+	buf := make([]byte, 8192)
+	for {
+		n, err := cpty.Read(buf)
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("ConPTY 读取错误: %v", err)
+			}
+			return
+		}
+		if n > 0 {
+			sendPtyOutput(conn, writeMu, sessionID, buf[:n])
+		}
+	}
+}
+
+// startPipeMode 管道降级模式
+func startPipeMode(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage) {
+	cmd := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NoExit")
+	cmd.Env = os.Environ()
+
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		log.Printf("ConPTY 启动失败: %v", err)
+		log.Printf("管道 stdin 失败: %v", err)
+		sendPtyExit(conn, writeMu, msg.ID, -1)
+		return
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Printf("管道 stdout 失败: %v", err)
+		sendPtyExit(conn, writeMu, msg.ID, -1)
+		return
+	}
+	cmd.Stderr = cmd.Stdout
+
+	if err := cmd.Start(); err != nil {
+		log.Printf("管道模式启动失败: %v", err)
 		sendPtyExit(conn, writeMu, msg.ID, -1)
 		return
 	}
 
 	session := &PtySession{
-		id:      msg.ID,
-		cpty:    cpty,
-		conn:    conn,
-		writeMu: writeMu,
-		done:    make(chan struct{}),
+		id: msg.ID, cmd: cmd, stdin: stdin, conn: conn, writeMu: writeMu,
+		done: make(chan struct{}), isPipe: true,
 	}
 
 	ptyManager.mu.Lock()
 	ptyManager.sessions[msg.ID] = session
 	ptyManager.mu.Unlock()
 
-	log.Printf("ConPTY 会话已启动: id=%s", msg.ID)
+	log.Printf("管道模式会话已启动: id=%s", msg.ID)
 
-	// ConPTY output → WebSocket
 	go func() {
 		defer func() {
 			close(session.done)
-
-			code, _ := cpty.Wait(context.Background())
-			exitCode := int(code)
-			cpty.Close()
-
+			exitCode := 0
+			if err := cmd.Wait(); err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					exitCode = exitErr.ExitCode()
+				} else {
+					exitCode = -1
+				}
+			}
 			ptyManager.mu.Lock()
 			delete(ptyManager.sessions, msg.ID)
 			ptyManager.mu.Unlock()
-
 			sendPtyExit(conn, writeMu, msg.ID, exitCode)
-			log.Printf("ConPTY 会话已结束: id=%s, exitCode=%d", msg.ID, exitCode)
+			log.Printf("管道模式会话已结束: id=%s, exitCode=%d", msg.ID, exitCode)
 		}()
 
 		buf := make([]byte, 8192)
 		for {
-			n, err := cpty.Read(buf)
+			n, err := stdout.Read(buf)
 			if err != nil {
 				if err != io.EOF {
-					log.Printf("ConPTY 读取错误: %v", err)
+					log.Printf("管道读取错误: %v", err)
 				}
 				return
 			}
 			if n > 0 {
-				outPayload, _ := json.Marshal(PtyOutputPayload{Data: string(buf[:n])})
-				outMsg, _ := json.Marshal(AgentMessage{
-					Type:    "pty_output",
-					ID:      msg.ID,
-					Payload: outPayload,
-				})
-				writeMu.Lock()
-				conn.WriteMessage(websocket.TextMessage, outMsg)
-				writeMu.Unlock()
+				sendPtyOutput(conn, writeMu, msg.ID, buf[:n])
 			}
 		}
 	}()
@@ -134,7 +200,14 @@ func handlePtyInput(msg AgentMessage) {
 	session, ok := ptyManager.sessions[msg.ID]
 	ptyManager.mu.Unlock()
 
-	if ok && session.cpty != nil {
+	if !ok {
+		return
+	}
+	if session.isPipe {
+		if session.stdin != nil {
+			session.stdin.Write([]byte(payload.Data))
+		}
+	} else if session.cpty != nil {
 		session.cpty.Write([]byte(payload.Data))
 	}
 }
@@ -147,7 +220,8 @@ func handlePtyResize(msg AgentMessage) {
 	session, ok := ptyManager.sessions[msg.ID]
 	ptyManager.mu.Unlock()
 
-	if ok && session.cpty != nil && payload.Cols > 0 && payload.Rows > 0 {
+	// 管道模式不支持 resize，仅 ConPTY 支持
+	if ok && !session.isPipe && session.cpty != nil && payload.Cols > 0 && payload.Rows > 0 {
 		session.cpty.Resize(payload.Cols, payload.Rows)
 	}
 }
@@ -157,9 +231,31 @@ func handlePtyClose(msg AgentMessage) {
 	session, ok := ptyManager.sessions[msg.ID]
 	ptyManager.mu.Unlock()
 
-	if ok && session.cpty != nil {
+	if !ok {
+		return
+	}
+	if session.isPipe {
+		if session.stdin != nil {
+			session.stdin.Close()
+		}
+		if session.cmd != nil && session.cmd.Process != nil {
+			session.cmd.Process.Kill()
+		}
+	} else if session.cpty != nil {
 		session.cpty.Close()
 	}
+}
+
+func sendPtyOutput(conn *websocket.Conn, writeMu *sync.Mutex, sessionID string, data []byte) {
+	outPayload, _ := json.Marshal(PtyOutputPayload{Data: string(data)})
+	outMsg, _ := json.Marshal(AgentMessage{
+		Type:    "pty_output",
+		ID:      sessionID,
+		Payload: outPayload,
+	})
+	writeMu.Lock()
+	conn.WriteMessage(websocket.TextMessage, outMsg)
+	writeMu.Unlock()
 }
 
 func sendPtyExit(conn *websocket.Conn, writeMu *sync.Mutex, sessionID string, code int) {
@@ -183,7 +279,14 @@ func cleanupAllPtySessions() {
 	ptyManager.mu.Unlock()
 
 	for _, s := range sessions {
-		if s.cpty != nil {
+		if s.isPipe {
+			if s.stdin != nil {
+				s.stdin.Close()
+			}
+			if s.cmd != nil && s.cmd.Process != nil {
+				s.cmd.Process.Kill()
+			}
+		} else if s.cpty != nil {
 			s.cpty.Close()
 		}
 	}
