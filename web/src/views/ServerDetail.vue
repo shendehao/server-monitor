@@ -121,7 +121,7 @@
           </div>
         </div>
         <div class="screen-viewer" v-if="screenStatus === 'connected' || screenFrame">
-          <img v-if="screenFrame" :src="'data:image/jpeg;base64,' + screenFrame" class="screen-img" />
+          <img v-if="screenFrame" :src="screenFrame" class="screen-img" />
           <div v-else class="screen-placeholder">等待截图...</div>
         </div>
       </div>
@@ -339,13 +339,16 @@ function connectScreen() {
   const wsUrl = `${proto}://${location.host}/ws/screen/${route.params.id}?token=${token}`
   screenWs = new WebSocket(wsUrl)
   screenWs.onopen = () => { screenStatus.value = 'connected' }
+  screenWs.binaryType = 'blob'
   screenWs.onmessage = (ev) => {
-    if (typeof ev.data === 'string') {
-      try {
-        const msg = JSON.parse(ev.data)
-        if (msg.data) screenFrame.value = msg.data
-      } catch {}
+    if (ev.data instanceof Blob) {
+      // 二进制 JPEG 帧 → Blob URL（比 base64 高效 33%）
+      const url = URL.createObjectURL(ev.data)
+      const old = screenFrame.value
+      screenFrame.value = url
+      if (old && old.startsWith('blob:')) URL.revokeObjectURL(old)
     }
+    // JSON 元数据（宽高等）忽略，只用图片
   }
   screenWs.onclose = () => {
     screenStatus.value = 'disconnected'
@@ -363,6 +366,9 @@ function disconnectScreen() {
     screenWs = null
   }
   screenStatus.value = 'disconnected'
+  if (screenFrame.value && screenFrame.value.startsWith('blob:')) {
+    URL.revokeObjectURL(screenFrame.value)
+  }
   screenFrame.value = ''
 }
 

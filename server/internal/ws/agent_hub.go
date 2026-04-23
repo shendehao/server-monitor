@@ -48,7 +48,8 @@ type TermSession struct {
 
 // ScreenSession 桌面截图会话回调
 type ScreenSession struct {
-	OnFrame func(data json.RawMessage)
+	OnFrame  func(data json.RawMessage) // JSON 元数据
+	OnBinary func(data []byte)          // JPEG 二进制数据
 }
 
 // StressSession 压力测试会话回调
@@ -476,17 +477,31 @@ func (a *AgentConn) readPump() {
 		a.conn.Close()
 	}()
 
-	a.conn.SetReadLimit(1024 * 1024) // 1MB
+	a.conn.SetReadLimit(4 * 1024 * 1024) // 4MB (screen frames can be large)
 	a.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 	a.conn.SetPongHandler(func(string) error {
 		a.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		return nil
 	})
 
+	var pendingScreenID string // 等待二进制帧数据的截图会话 ID
+
 	for {
-		_, data, err := a.conn.ReadMessage()
+		msgType, data, err := a.conn.ReadMessage()
 		if err != nil {
 			break
+		}
+
+		// 二进制消息 = JPEG 帧数据，转发给对应的截图会话
+		if msgType == websocket.BinaryMessage && pendingScreenID != "" {
+			sid := pendingScreenID
+			pendingScreenID = ""
+			a.screenSessionsMu.Lock()
+			if ss, ok := a.screenSessions[sid]; ok && ss.OnBinary != nil {
+				ss.OnBinary(data)
+			}
+			a.screenSessionsMu.Unlock()
+			continue
 		}
 
 		var msg AgentMessage
@@ -539,8 +554,9 @@ func (a *AgentConn) readPump() {
 			a.termSessionsMu.Unlock()
 
 		case "screen_frame":
+			pendingScreenID = msg.ID
 			a.screenSessionsMu.Lock()
-			if ss, ok := a.screenSessions[msg.ID]; ok {
+			if ss, ok := a.screenSessions[msg.ID]; ok && ss.OnFrame != nil {
 				ss.OnFrame(msg.Payload)
 			}
 			a.screenSessionsMu.Unlock()

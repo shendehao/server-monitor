@@ -343,8 +343,15 @@ func (h *TerminalHandler) HandleScreen(w http.ResponseWriter, r *http.Request, s
 
 	ss := &ws.ScreenSession{
 		OnFrame: func(data json.RawMessage) {
+			// JSON 元数据（宽高、时间戳）
 			wsMu.Lock()
 			wsConn.WriteMessage(gorillaws.TextMessage, data)
+			wsMu.Unlock()
+		},
+		OnBinary: func(data []byte) {
+			// JPEG 二进制帧
+			wsMu.Lock()
+			wsConn.WriteMessage(gorillaws.BinaryMessage, data)
 			wsMu.Unlock()
 		},
 	}
