@@ -391,6 +391,7 @@ func handleExec(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage) {
 	} else {
 		cmd = exec.Command("sh", "-c", req.Command)
 	}
+	hideWindow(cmd)
 	output, err := cmd.CombinedOutput()
 	result.Output = string(output)
 
@@ -481,6 +482,7 @@ func autoRollbackGuard() {
 	cmd.Env = os.Environ()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	hideWindow(cmd)
 	cmd.Start()
 	os.Exit(1)
 }
@@ -621,6 +623,7 @@ func handleSelfUpdate(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessag
 	cmd.Env = os.Environ()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	hideWindow(cmd)
 	cmd.Start()
 
 	os.Exit(0)
