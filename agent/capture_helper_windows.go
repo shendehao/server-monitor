@@ -31,6 +31,8 @@ var (
 	modAdvapi32Cap                   = syscall.NewLazyDLL("advapi32.dll")
 	procWTSGetActiveConsoleSessionId = modKernel32Cap.NewProc("WTSGetActiveConsoleSessionId")
 	procWTSQueryUserToken            = modWtsapi32.NewProc("WTSQueryUserToken")
+	procWTSEnumerateSessionsW        = modWtsapi32.NewProc("WTSEnumerateSessionsW")
+	procWTSFreeMemory                = modWtsapi32.NewProc("WTSFreeMemory")
 	procCreateEnvironmentBlock       = modUserenv.NewProc("CreateEnvironmentBlock")
 	procDestroyEnvironmentBlock      = modUserenv.NewProc("DestroyEnvironmentBlock")
 	procDuplicateTokenEx             = modAdvapi32Cap.NewProc("DuplicateTokenEx")
@@ -94,6 +96,9 @@ func runCaptureHelper() {
 	if intervalMs <= 0 {
 		intervalMs = 500
 	}
+
+	// 子进程也需要显式绑定到交互式桌面
+	attachToInteractiveDesktop()
 
 	tmpFile := outputFile + ".tmp"
 	ticker := time.NewTicker(time.Duration(intervalMs) * time.Millisecond)
@@ -177,20 +182,49 @@ func (h *helperProcess) Kill() {
 	os.Remove(h.outFile + ".tmp")
 }
 
-// startHelperInUserSession 在交互式用户会话中启动长驻截图子进程
-func startHelperInUserSession(quality, scale, intervalMs int) (*helperProcess, error) {
-	selfPath, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("get executable path: %v", err)
+// findActiveSessionIDs 返回所有活跃的用户会话 ID（控制台优先，然后 RDP）
+func findActiveSessionIDs() []uint32 {
+	var ids []uint32
+	// 1. 优先尝试物理控制台会话
+	consoleID := wtsGetActiveConsoleSessionId()
+	if consoleID != 0xFFFFFFFF && consoleID != 0 {
+		ids = append(ids, consoleID)
 	}
-
-	outFile := filepath.Join(filepath.Dir(selfPath), "screen_frame.dat")
-
-	sessionID := wtsGetActiveConsoleSessionId()
-	if sessionID == 0xFFFFFFFF {
-		return nil, fmt.Errorf("no active console session")
+	// 2. 枚举所有会话，找 Active 状态的（包括 RDP）
+	var pSessionInfo uintptr
+	var count uint32
+	r, _, _ := procWTSEnumerateSessionsW.Call(0, 0, 1,
+		uintptr(unsafe.Pointer(&pSessionInfo)), uintptr(unsafe.Pointer(&count)))
+	if r != 0 && pSessionInfo != 0 {
+		defer procWTSFreeMemory.Call(pSessionInfo)
+		type wtsSessionInfo struct {
+			SessionID      uint32
+			WinStationName *uint16
+			State          uint32
+		}
+		size := unsafe.Sizeof(wtsSessionInfo{})
+		for i := uint32(0); i < count; i++ {
+			info := (*wtsSessionInfo)(unsafe.Pointer(pSessionInfo + uintptr(i)*size))
+			// State 0 = WTSActive
+			if info.State == 0 && info.SessionID != 0 {
+				found := false
+				for _, id := range ids {
+					if id == info.SessionID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					ids = append(ids, info.SessionID)
+				}
+			}
+		}
 	}
+	return ids
+}
 
+// tryLaunchInSession 尝试在指定会话中启动截图子进程
+func tryLaunchInSession(sessionID uint32, selfPath, outFile string, quality, scale, intervalMs int) (*helperProcess, error) {
 	var userToken syscall.Handle
 	if err := wtsQueryUserToken(sessionID, &userToken); err != nil {
 		return nil, fmt.Errorf("WTSQueryUserToken(session=%d): %v", sessionID, err)
@@ -236,7 +270,7 @@ func startHelperInUserSession(quality, scale, intervalMs int) (*helperProcess, e
 		uintptr(unsafe.Pointer(&pi)),
 	)
 	if r == 0 {
-		return nil, fmt.Errorf("CreateProcessAsUser: %v", e)
+		return nil, fmt.Errorf("CreateProcessAsUser(session=%d): %v", sessionID, e)
 	}
 
 	// 等一小会确认子进程活着
@@ -246,11 +280,38 @@ func startHelperInUserSession(quality, scale, intervalMs int) (*helperProcess, e
 	if exitCode != 259 { // 259 = STILL_ACTIVE
 		syscall.CloseHandle(pi.Thread)
 		syscall.CloseHandle(pi.Process)
-		return nil, fmt.Errorf("capture helper exited immediately (code=%d)", exitCode)
+		return nil, fmt.Errorf("helper exited immediately in session %d (code=%d)", sessionID, exitCode)
 	}
 
-	log.Printf("截图子进程已启动: pid=%d, output=%s", pi.ProcessId, outFile)
+	log.Printf("截图子进程已启动: session=%d, pid=%d, output=%s", sessionID, pi.ProcessId, outFile)
 	return &helperProcess{proc: pi.Process, thread: pi.Thread, outFile: outFile}, nil
+}
+
+// startHelperInUserSession 在交互式用户会话中启动长驻截图子进程
+// 优先尝试控制台会话，失败则尝试所有活跃 RDP 会话
+func startHelperInUserSession(quality, scale, intervalMs int) (*helperProcess, error) {
+	selfPath, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("get executable path: %v", err)
+	}
+	outFile := filepath.Join(filepath.Dir(selfPath), "screen_frame.dat")
+
+	sessions := findActiveSessionIDs()
+	if len(sessions) == 0 {
+		return nil, fmt.Errorf("no active user sessions found")
+	}
+
+	var lastErr error
+	for _, sid := range sessions {
+		hp, err := tryLaunchInSession(sid, selfPath, outFile, quality, scale, intervalMs)
+		if err != nil {
+			lastErr = err
+			log.Printf("会话 %d 启动失败: %v，尝试下一个", sid, err)
+			continue
+		}
+		return hp, nil
+	}
+	return nil, fmt.Errorf("all sessions failed, last: %v", lastErr)
 }
 
 // readFrameFromFile 读取子进程写的帧文件
