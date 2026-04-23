@@ -91,7 +91,7 @@
       </div>
 
       <!-- 桌面查看器 -->
-      <div class="screen-section" v-if="detail?.connectMethod === 'agent' || detail?.connectMethod === 'plugin'">
+      <div class="screen-section">
         <div class="screen-header">
           <span class="section-title">桌面查看</span>
           <span class="term-status" :class="screenStatus">{{ screenStatusText }}</span>
