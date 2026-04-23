@@ -99,8 +99,14 @@
             <select v-model="screenFps" @change="updateScreenConfig" class="screen-select">
               <option :value="1">1 FPS</option>
               <option :value="2">2 FPS</option>
-              <option :value="3">3 FPS</option>
               <option :value="5">5 FPS</option>
+              <option :value="10">10 FPS</option>
+              <option :value="15">15 FPS</option>
+            </select>
+            <select v-model="screenQuality" @change="updateScreenConfig" class="screen-select">
+              <option :value="30">低画质</option>
+              <option :value="50">中画质</option>
+              <option :value="70">高画质</option>
             </select>
             <select v-model="screenScale" @change="updateScreenConfig" class="screen-select">
               <option :value="30">30%</option>
@@ -165,6 +171,7 @@ const screenStatus = ref<'disconnected' | 'connected'>('disconnected')
 const screenStatusText = computed(() => screenStatus.value === 'connected' ? '实时查看中' : '未连接')
 const screenFrame = ref('')
 const screenFps = ref(2)
+const screenQuality = ref(50)
 const screenScale = ref(50)
 let screenWs: WebSocket | null = null
 
@@ -364,7 +371,7 @@ function updateScreenConfig() {
     screenWs.send(JSON.stringify({
       type: 'config',
       fps: screenFps.value,
-      quality: 50,
+      quality: screenQuality.value,
       scale: screenScale.value,
     }))
   }

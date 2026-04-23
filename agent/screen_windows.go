@@ -53,8 +53,8 @@ func handleScreenStart(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessa
 	json.Unmarshal(msg.Payload, &payload)
 
 	// 默认值
-	if payload.FPS <= 0 || payload.FPS > 5 {
-		payload.FPS = 1
+	if payload.FPS <= 0 || payload.FPS > 15 {
+		payload.FPS = 2
 	}
 	if payload.Quality <= 0 || payload.Quality > 100 {
 		payload.Quality = 50
