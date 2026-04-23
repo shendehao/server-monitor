@@ -165,6 +165,7 @@ let fitAddon: FitAddon | null = null
 let termWs: WebSocket | null = null
 let resizeObserver: ResizeObserver | null = null
 let pipeMode = false // agent 管道模式下本地回显
+let pipeInputLen = 0 // 管道模式：当前行已输入字符数（防止退格删提示符）
 
 // 桌面查看器
 const screenStatus = ref<'disconnected' | 'connected'>('disconnected')
@@ -224,10 +225,15 @@ function initXterm() {
       if (pipeMode) {
         if (data === '\r') {
           term!.write('\r\n')
+          pipeInputLen = 0
         } else if (data === '\x7f' || data === '\x08') {
-          term!.write('\b \b')
+          if (pipeInputLen > 0) {
+            term!.write('\b \b')
+            pipeInputLen--
+          }
         } else if (data >= ' ') {
           term!.write(data)
+          pipeInputLen += data.length
         }
       }
       termWs.send(data)
@@ -295,6 +301,8 @@ function connectTerminal() {
         } catch {}
       }
       term.write(ev.data)
+      // 服务端输出后重置输入计数（新提示符出现）
+      if (pipeMode) pipeInputLen = 0
     }
   }
 

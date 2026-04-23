@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"hash/fnv"
 	"image"
 	"image/jpeg"
@@ -95,7 +96,7 @@ func screenCaptureLoop(session *ScreenSession, cfg ScreenStartPayload) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	var lastHash uint64
+	var lastHash uint64 = 0xFFFFFFFFFFFFFFFF // 哨兵值，确保第一帧一定发送
 	var jpegBuf bytes.Buffer
 
 	for {
@@ -123,7 +124,7 @@ func screenCaptureLoop(session *ScreenSession, cfg ScreenStartPayload) {
 func captureScreenBinary(buf *bytes.Buffer, quality, scale int) (int, int, uint64, error) {
 	n := screenshot.NumActiveDisplays()
 	if n == 0 {
-		return 0, 0, 0, nil
+		return 0, 0, 0, fmt.Errorf("no active displays")
 	}
 
 	bounds := screenshot.GetDisplayBounds(0)
