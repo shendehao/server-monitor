@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 
 	"github.com/UserExistsError/conpty"
 	"github.com/gorilla/websocket"
@@ -68,26 +69,9 @@ func handlePtyStart(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage)
 		payload.Rows = 30
 	}
 
-	// 优先尝试 ConPTY
-	if conpty.IsConPtyAvailable() {
-		cpty, err := conpty.Start("powershell.exe -NoLogo -NoProfile", conpty.ConPtyDimensions(payload.Cols, payload.Rows))
-		if err == nil {
-			session := &PtySession{
-				id: msg.ID, cpty: cpty, conn: conn, writeMu: writeMu,
-				done: make(chan struct{}), isPipe: false,
-			}
-			ptyManager.mu.Lock()
-			ptyManager.sessions[msg.ID] = session
-			ptyManager.mu.Unlock()
-			log.Printf("ConPTY 会话已启动: id=%s", msg.ID)
-			sendPtyStarted(conn, writeMu, msg.ID, "conpty")
-			go readConPTY(session, cpty, conn, writeMu, msg.ID)
-			return
-		}
-		log.Printf("ConPTY 启动失败，降级管道模式: %v", err)
-	}
-
-	// 降级：管道模式
+	// 注意: ConPTY 库的 CreateProcess 不支持 CREATE_NO_WINDOW，
+	// 会在桌面弹出 PowerShell 窗口。暂时禁用 ConPTY，仅用管道模式。
+	// 管道模式 + 前端本地回显 = 功能正常且不弹窗口。
 	startPipeMode(conn, writeMu, msg)
 }
 
@@ -126,6 +110,10 @@ func readConPTY(session *PtySession, cpty *conpty.ConPty, conn *websocket.Conn, 
 func startPipeMode(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage) {
 	cmd := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NoExit")
 	cmd.Env = os.Environ()
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
