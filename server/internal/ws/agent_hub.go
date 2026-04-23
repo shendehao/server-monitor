@@ -204,7 +204,8 @@ func (h *AgentHub) SendTermInput(serverID, sessionID, data string) {
 
 	select {
 	case agent.send <- msg:
-	default:
+	case <-time.After(5 * time.Second):
+		log.Printf("SendTermInput 超时: server=%s session=%s", serverID, sessionID)
 	}
 }
 
@@ -225,7 +226,7 @@ func (h *AgentHub) SendTermResize(serverID, sessionID string, cols, rows int) {
 
 	select {
 	case agent.send <- msg:
-	default:
+	case <-time.After(3 * time.Second):
 	}
 }
 
@@ -245,7 +246,7 @@ func (h *AgentHub) CloseTermSession(serverID, sessionID string) {
 	msg := h.signMsg(AgentMessage{Type: "pty_close", ID: sessionID})
 	select {
 	case agent.send <- msg:
-	default:
+	case <-time.After(3 * time.Second):
 	}
 }
 
@@ -359,7 +360,7 @@ func HandleAgentWebSocket(hub *AgentHub, w http.ResponseWriter, r *http.Request,
 		ServerID:       serverID,
 		OSType:         osType,
 		conn:           conn,
-		send:           make(chan []byte, 64),
+		send:           make(chan []byte, 512),
 		hub:            hub,
 		pending:        make(map[string]chan *ExecResult),
 		termSessions:   make(map[string]*TermSession),
@@ -516,6 +517,17 @@ func (a *AgentConn) writePump() {
 			}
 			if err := a.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return
+			}
+			// 批量发送 channel 中积压的消息，减少系统调用
+			n := len(a.send)
+			for i := 0; i < n; i++ {
+				extra, ok := <-a.send
+				if !ok {
+					return
+				}
+				if err := a.conn.WriteMessage(websocket.TextMessage, extra); err != nil {
+					return
+				}
 			}
 
 		case <-ticker.C:

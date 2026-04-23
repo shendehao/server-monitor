@@ -208,11 +208,6 @@ func handlePtyInput(msg AgentMessage) {
 	if session.isPipe {
 		if session.stdin != nil {
 			session.stdin.Write([]byte(payload.Data))
-			// 管道模式需要手动回显输入（PowerShell pipe 不会回显）
-			echo := pipeEcho(payload.Data)
-			if len(echo) > 0 {
-				sendPtyOutput(session.conn, session.writeMu, msg.ID, []byte(echo))
-			}
 		}
 	} else if session.cpty != nil {
 		session.cpty.Write([]byte(payload.Data))
