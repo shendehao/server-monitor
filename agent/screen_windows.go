@@ -80,11 +80,7 @@ func handleScreenStart(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessa
 
 	log.Printf("桌面截图会话已启动: id=%s, fps=%d, quality=%d, scale=%d%%", msg.ID, payload.FPS, payload.Quality, payload.Scale)
 
-	if shouldUseHelper() {
-		go screenCaptureLoopSession0(session, payload)
-	} else {
-		go screenCaptureLoop(session, payload)
-	}
+	go screenCaptureLoop(session, payload)
 }
 
 func screenCaptureLoop(session *ScreenSession, cfg ScreenStartPayload) {
@@ -114,9 +110,16 @@ func screenCaptureLoop(session *ScreenSession, cfg ScreenStartPayload) {
 			if err != nil {
 				errCount++
 				log.Printf("截图失败: %v", err)
-				// 前3次错误发送到前端显示
 				if errCount <= 3 {
 					sendScreenError(session, fmt.Sprintf("截图失败: %v", err))
+				}
+				// 连续失败5次，自动切换到 Session 0 helper 模式
+				if errCount >= 5 {
+					log.Printf("直接截图连续失败%d次，切换到子进程截图模式", errCount)
+					sendScreenError(session, "正在切换到子进程截图模式...")
+					ticker.Stop()
+					screenCaptureLoopSession0(session, cfg)
+					return
 				}
 				continue
 			}

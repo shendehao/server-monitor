@@ -276,15 +276,8 @@ func captureScreenWithFallback(buf *bytes.Buffer, quality, scale int) (int, int,
 }
 
 // screenCaptureLoopSession0 Session 0 专用截图循环：启动一个长驻子进程
+// 注意：调用者负责 session 的清理（close(done), delete from map）
 func screenCaptureLoopSession0(session *ScreenSession, cfg ScreenStartPayload) {
-	defer func() {
-		close(session.done)
-		screenManager.mu.Lock()
-		delete(screenManager.sessions, session.id)
-		screenManager.mu.Unlock()
-		log.Printf("桌面截图会话已结束(Session0): id=%s", session.id)
-	}()
-
 	intervalMs := 1000 / cfg.FPS
 	helper, err := startHelperInUserSession(cfg.Quality, cfg.Scale, intervalMs)
 	if err != nil {
