@@ -128,7 +128,11 @@ let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let termWs: WebSocket | null = null
 let resizeObserver: ResizeObserver | null = null
-let pipeMode = false // 管道模式下启用本地回显
+let pipeMode = false
+let echoDetected = false   // 是否检测到远端回显
+let echoCheckDone = false  // 回显检测已完成
+let pendingEcho = ''       // 等待回显的字符
+let echoTimer: any = null
 
 function initXterm() {
   if (!xtermRef.value || term) return
@@ -172,11 +176,24 @@ function initXterm() {
   term.open(xtermRef.value)
   fitAddon.fit()
 
-  // 键盘输入 → WebSocket（只注册一次，避免重复发送）
+  // 键盘输入 → WebSocket
   term.onData((data: string) => {
     if (termWs && termWs.readyState === WebSocket.OPEN) {
-      // 管道模式下本地回显（ConPTY/SSH 由远端回显）
-      if (pipeMode) {
+      termWs.send(data)
+      // 自动检测回显：第一次输入可打印字符时，等 500ms 看服务端是否回显
+      if (!echoCheckDone && !echoTimer && data.length === 1 && data >= ' ' && data < '\x7f') {
+        pendingEcho = data
+        echoTimer = setTimeout(() => {
+          if (!echoDetected) {
+            pipeMode = true
+            // 回显第一个被吞的字符
+            term!.write(pendingEcho)
+          }
+          echoCheckDone = true
+          echoTimer = null
+        }, 500)
+      } else if (pipeMode) {
+        // 管道模式：本地回显
         if (data === '\r') {
           term!.write('\r\n')
         } else if (data === '\x7f' || data === '\x08') {
@@ -185,7 +202,6 @@ function initXterm() {
           term!.write(data)
         }
       }
-      termWs.send(data)
     }
   })
 
@@ -218,6 +234,10 @@ function connectTerminal() {
 
   termStatus.value = 'connecting'
   pipeMode = false
+  echoDetected = false
+  echoCheckDone = false
+  pendingEcho = ''
+  if (echoTimer) { clearTimeout(echoTimer); echoTimer = null }
   term.clear()
   term.writeln('\x1b[33m正在连接...\x1b[0m')
 
@@ -242,12 +262,17 @@ function connectTerminal() {
           const msg = JSON.parse(ev.data)
           if (msg.type === 'pty_mode') {
             pipeMode = msg.mode === 'pipe'
-            if (pipeMode) {
-              term.writeln('\x1b[33m[管道模式 - 退格/箭头键可能受限]\x1b[0m')
-            }
+            echoCheckDone = true
+            if (echoTimer) { clearTimeout(echoTimer); echoTimer = null }
             return
           }
         } catch {}
+      }
+      // 回显检测：如果服务端返回的数据包含我们输入的字符，说明远端有回显
+      if (!echoCheckDone && pendingEcho && ev.data.includes(pendingEcho)) {
+        echoDetected = true
+        echoCheckDone = true
+        if (echoTimer) { clearTimeout(echoTimer); echoTimer = null }
       }
       term.write(ev.data)
     }
