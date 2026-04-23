@@ -580,25 +580,39 @@ func handleSelfUpdate(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessag
 	os.Remove(backupPath)
 
 	if runtime.GOOS == "windows" {
-		// Windows: 运行中的 exe 可以被 rename，但不能被覆盖
-		// 先把当前 exe rename 为 .bak，再把新 exe rename 为原名
-		if err := os.Rename(selfPath, backupPath); err != nil {
-			// Windows 下如果 rename 失败，尝试 copy 覆盖方式
-			log.Printf("Windows rename 失败，尝试 copy 方式: %v", err)
-			if cpErr := copyFile(tmpPath, selfPath); cpErr != nil {
-				os.Remove(tmpPath)
-				sendUpdateResult(conn, writeMu, msg.ID, false, "Windows 替换失败: "+cpErr.Error())
-				return
-			}
+		// Windows: 使用批处理脚本辅助更新（最可靠的方式）
+		// 批处理等待当前进程退出后替换文件并启动新版本
+		batPath := filepath.Join(selfDir, ".agent-update.bat")
+		selfName := filepath.Base(selfPath)
+		batContent := fmt.Sprintf("@echo off\r\n"+
+			"ping -n 3 127.0.0.1 > nul\r\n"+ // 等待3秒
+			"taskkill /F /IM \"%s\" >nul 2>&1\r\n"+
+			"ping -n 2 127.0.0.1 > nul\r\n"+ // 再等2秒确保进程退出
+			"del /F /Q \"%s\" >nul 2>&1\r\n"+ // 删除旧文件
+			"move /Y \"%s\" \"%s\" >nul 2>&1\r\n"+ // 移动新文件
+			"if not exist \"%s\" copy /Y \"%s\" \"%s\" >nul 2>&1\r\n"+ // 备用：copy
+			"start \"\" \"%s\"\r\n"+ // 启动新版本
+			"del /F /Q \"%%~f0\" >nul 2>&1\r\n", // 删除自身
+			selfName,
+			selfPath,
+			tmpPath, selfPath,
+			selfPath, tmpPath, selfPath,
+			selfPath,
+		)
+		if err := os.WriteFile(batPath, []byte(batContent), 0644); err != nil {
 			os.Remove(tmpPath)
-		} else {
-			if err := os.Rename(tmpPath, selfPath); err != nil {
-				os.Rename(backupPath, selfPath) // 恢复
-				os.Remove(tmpPath)
-				sendUpdateResult(conn, writeMu, msg.ID, false, "替换失败: "+err.Error())
-				return
-			}
+			sendUpdateResult(conn, writeMu, msg.ID, false, "创建更新脚本失败: "+err.Error())
+			return
 		}
+
+		sendUpdateResult(conn, writeMu, msg.ID, true, "更新成功，正在重启...")
+		log.Println("Windows 更新：启动批处理辅助更新...")
+
+		batCmd := exec.Command("cmd.exe", "/C", batPath)
+		hideWindow(batCmd)
+		batCmd.Start()
+		time.Sleep(500 * time.Millisecond)
+		os.Exit(0)
 	} else {
 		// Linux: 标准 rename 替换
 		if err := os.Rename(selfPath, backupPath); err != nil {
@@ -617,7 +631,7 @@ func handleSelfUpdate(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessag
 	log.Println("更新完成，2秒后重启...")
 	time.Sleep(2 * time.Second)
 
-	// 重启自身
+	// 重启自身（仅 Linux 走到这里，Windows 已在上面 exit）
 	cmd := exec.Command(selfPath)
 	cmd.Dir = selfDir
 	cmd.Env = os.Environ()

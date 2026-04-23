@@ -268,6 +268,9 @@
                 <el-button type="warning" :loading="winPushing" :disabled="!winBinInfo.exists" @click="pushUpdate('windows')">
                   一键推送更新
                 </el-button>
+                <el-button type="danger" :loading="winForcePushing" :disabled="!winBinInfo.exists" @click="forceUpdateWin()" style="margin-left:8px">
+                  强制更新(兼容旧版)
+                </el-button>
                 <span v-if="winPushResult" class="push-result" :class="{ success: winPushResult.includes('成功') }">{{ winPushResult }}</span>
               </div>
             </div>
@@ -502,6 +505,7 @@ const linuxUploading = ref(false)
 const winUploading = ref(false)
 const linuxPushing = ref(false)
 const winPushing = ref(false)
+const winForcePushing = ref(false)
 const linuxPushResult = ref('')
 const winPushResult = ref('')
 
@@ -556,6 +560,26 @@ async function pushUpdate(platform: string) {
     ElMessage.error(pushResult.value)
   } finally {
     pushing.value = false
+  }
+}
+
+async function forceUpdateWin() {
+  winForcePushing.value = true
+  winPushResult.value = ''
+  try {
+    const res: any = await agentUpdateApi.forceUpdateWin()
+    if (res.success) {
+      winPushResult.value = res.message || '强制更新指令已发送'
+      ElMessage.success(winPushResult.value)
+    } else {
+      winPushResult.value = res.error || '强制更新失败'
+      ElMessage.error(winPushResult.value)
+    }
+  } catch (err: any) {
+    winPushResult.value = '强制更新失败: ' + (err.message || err)
+    ElMessage.error(winPushResult.value)
+  } finally {
+    winForcePushing.value = false
   }
 }
 

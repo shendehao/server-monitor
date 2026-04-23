@@ -110,6 +110,15 @@ func (h *AgentHub) signMsg(msg AgentMessage) []byte {
 	return data
 }
 
+// ForEachAgent 遍历所有在线 Agent，回调 (serverID, osType)
+func (h *AgentHub) ForEachAgent(fn func(serverID, osType string)) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for sid, agent := range h.agents {
+		fn(sid, agent.OSType)
+	}
+}
+
 // IsAgentOnline 检查 Agent 是否在线
 func (h *AgentHub) IsAgentOnline(serverID string) bool {
 	h.mu.RLock()

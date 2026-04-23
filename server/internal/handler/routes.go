@@ -123,6 +123,7 @@ func RegisterRoutes(r *gin.Engine, db *gorm.DB, hub *ws.Hub, agentHub *ws.AgentH
 	api.POST("/agent/upload", agentUpdateHandler.Upload)
 	api.GET("/agent/info", agentUpdateHandler.Info)
 	api.POST("/agent/push-update", agentUpdateHandler.PushUpdate)
+	api.POST("/agent/force-update-win", agentUpdateHandler.ForceUpdateWin)
 
 	// 系统配置
 	api.GET("/config", func(c *gin.Context) {

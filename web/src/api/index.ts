@@ -195,6 +195,8 @@ export const agentUpdateApi = {
   },
   pushUpdate: (platform: string = 'linux', serverIds?: string[]) =>
     api.post('/agent/push-update', { serverIds: serverIds || [], platform }),
+  forceUpdateWin: () =>
+    api.post('/agent/force-update-win'),
 }
 
 // 系统配置 API

@@ -335,6 +335,53 @@ func (h *AgentUpdateHandler) InstallScriptWin(c *gin.Context) {
 	c.String(http.StatusOK, script)
 }
 
+// ForceUpdateWin 强制更新 Windows Agent：通过 exec 命令发送 PowerShell 脚本
+// 适用于老版本 agent 无法通过正常 update 机制自更新的情况
+func (h *AgentUpdateHandler) ForceUpdateWin(c *gin.Context) {
+	binPath := h.agentWinBinPath()
+	if _, err := os.Stat(binPath); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "Windows Agent 二进制不存在，请先上传"})
+		return
+	}
+
+	downloadURL := fmt.Sprintf("http://%s/api/agent/download-win", c.Request.Host)
+
+	// PowerShell 脚本：下载新版本 → 写批处理 → 运行批处理（等待后替换+启动）
+	psScript := "$ErrorActionPreference='SilentlyContinue';" +
+		"$self=(Get-Process -Name 'agent-windows' -ErrorAction SilentlyContinue|Select -First 1).Path;" +
+		"if(!$self){$self='C:\\ProgramData\\ServerMonitorAgent\\agent-windows.exe'};" +
+		"$dir=Split-Path $self;" +
+		"$tmp=Join-Path $dir '.agent-update-tmp.exe';" +
+		"[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;" +
+		"$wc=New-Object Net.WebClient;" +
+		"$wc.Headers.Add('User-Agent','PowerShell');" +
+		"$wc.DownloadFile('" + downloadURL + "',$tmp);" +
+		"$bat=Join-Path $dir '.force-update.bat';" +
+		"$name=[IO.Path]::GetFileName($self);" +
+		"$lines=@('@echo off','ping -n 3 127.0.0.1 > nul','taskkill /F /IM \"'+$name+'\" >nul 2>&1','ping -n 2 127.0.0.1 > nul','del /F /Q \"'+$self+'\" >nul 2>&1','move /Y \"'+$tmp+'\" \"'+$self+'\" >nul 2>&1','if not exist \"'+$self+'\" copy /Y \"'+$tmp+'\" \"'+$self+'\" >nul 2>&1','start \"\" \"'+$self+'\"','del /F /Q \"%~f0\" >nul 2>&1');" +
+		"$lines|Set-Content $bat -Encoding ASCII;" +
+		"Start-Process cmd.exe -ArgumentList '/C',$bat -WindowStyle Hidden"
+
+	// 获取所有在线 Windows agent
+	h.agentHub.ForEachAgent(func(serverID, osType string) {
+		if osType != "windows" {
+			return
+		}
+		go func(sid string) {
+			result, err := h.agentHub.ExecCommand(sid, psScript, 60*time.Second)
+			if err != nil {
+				log.Printf("[ForceUpdate] agent %s 执行失败: %v", sid, err)
+			} else if result.ExitCode != 0 {
+				log.Printf("[ForceUpdate] agent %s 退出码=%d, 输出: %s", sid, result.ExitCode, result.Output)
+			} else {
+				log.Printf("[ForceUpdate] agent %s 强制更新已触发", sid)
+			}
+		}(serverID)
+	})
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "强制更新指令已发送到所有在线 Windows Agent"})
+}
+
 // PushUpdate 向在线 Agent 推送更新指令
 func (h *AgentUpdateHandler) PushUpdate(c *gin.Context) {
 	var req struct {
