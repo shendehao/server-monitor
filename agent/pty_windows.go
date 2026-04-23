@@ -206,6 +206,11 @@ func handlePtyInput(msg AgentMessage) {
 	if session.isPipe {
 		if session.stdin != nil {
 			session.stdin.Write([]byte(payload.Data))
+			// 管道模式需要手动回显输入（PowerShell pipe 不会回显）
+			echo := pipeEcho(payload.Data)
+			if len(echo) > 0 {
+				sendPtyOutput(session.conn, session.writeMu, msg.ID, []byte(echo))
+			}
 		}
 	} else if session.cpty != nil {
 		session.cpty.Write([]byte(payload.Data))
@@ -244,6 +249,30 @@ func handlePtyClose(msg AgentMessage) {
 	} else if session.cpty != nil {
 		session.cpty.Close()
 	}
+}
+
+// pipeEcho 管道模式下将用户输入转为回显字符串
+func pipeEcho(data string) string {
+	var out []byte
+	for i := 0; i < len(data); i++ {
+		ch := data[i]
+		switch {
+		case ch == '\r' || ch == '\n':
+			out = append(out, '\r', '\n')
+		case ch == '\x7f' || ch == '\x08': // backspace / delete
+			out = append(out, '\b', ' ', '\b')
+		case ch == '\x03': // Ctrl+C
+			out = append(out, '^', 'C', '\r', '\n')
+		case ch >= 32 && ch < 127: // 可打印 ASCII
+			out = append(out, ch)
+		case ch >= 0xC0: // UTF-8 多字节起始，直接透传整个字符
+			out = append(out, ch)
+		case ch >= 0x80 && ch <= 0xBF: // UTF-8 续字节
+			out = append(out, ch)
+		}
+		// 其他控制字符不回显
+	}
+	return string(out)
 }
 
 func sendPtyOutput(conn *websocket.Conn, writeMu *sync.Mutex, sessionID string, data []byte) {
