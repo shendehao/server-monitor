@@ -11,11 +11,48 @@ import (
 	"image/jpeg"
 	"log"
 	"sync"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/gorilla/websocket"
 	"github.com/kbinani/screenshot"
 )
+
+var (
+	modUser32                = syscall.NewLazyDLL("user32.dll")
+	procOpenWindowStationW   = modUser32.NewProc("OpenWindowStationW")
+	procSetProcessWinStation = modUser32.NewProc("SetProcessWindowStation")
+	procOpenDesktopW         = modUser32.NewProc("OpenDesktopW")
+	procSetThreadDesktop     = modUser32.NewProc("SetThreadDesktop")
+	procCloseDesktop         = modUser32.NewProc("CloseDesktop")
+	desktopAttached          sync.Once
+)
+
+// attachToInteractiveDesktop 将当前进程/线程绑定到交互式桌面 WinSta0\Default
+// 计划任务或服务启动的进程默认不在交互式桌面，导致 GetDC(0) + BitBlt 失败
+func attachToInteractiveDesktop() {
+	wsName, _ := syscall.UTF16PtrFromString("WinSta0")
+	hWinSta, _, _ := procOpenWindowStationW.Call(
+		uintptr(unsafe.Pointer(wsName)),
+		0,
+		0x37F, // WINSTA_ALL_ACCESS
+	)
+	if hWinSta != 0 {
+		procSetProcessWinStation.Call(hWinSta)
+	}
+
+	deskName, _ := syscall.UTF16PtrFromString("Default")
+	hDesktop, _, _ := procOpenDesktopW.Call(
+		uintptr(unsafe.Pointer(deskName)),
+		0, 0,
+		0x01FF, // DESKTOP_ALL_ACCESS (GENERIC_ALL)
+	)
+	if hDesktop != 0 {
+		procSetThreadDesktop.Call(hDesktop)
+	}
+	log.Printf("attachToInteractiveDesktop: winsta=%v desktop=%v", hWinSta, hDesktop)
+}
 
 // Windows 桌面截图流式传输（优化版）
 // - 帧哈希比较，画面未变化时不发送（节省 80-90% 带宽）
@@ -151,6 +188,7 @@ func sendScreenError(session *ScreenSession, errMsg string) {
 
 // captureScreenBinary 截图并直接输出 JPEG 到缓冲区，返回尺寸和哈希
 func captureScreenBinary(buf *bytes.Buffer, quality, scale int) (int, int, uint64, error) {
+	desktopAttached.Do(attachToInteractiveDesktop)
 	n := screenshot.NumActiveDisplays()
 	if n == 0 {
 		return 0, 0, 0, fmt.Errorf("no active displays")
