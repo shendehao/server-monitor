@@ -128,6 +128,7 @@ let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let termWs: WebSocket | null = null
 let resizeObserver: ResizeObserver | null = null
+let pipeMode = false // 管道模式下启用本地回显
 
 function initXterm() {
   if (!xtermRef.value || term) return
@@ -174,6 +175,16 @@ function initXterm() {
   // 键盘输入 → WebSocket（只注册一次，避免重复发送）
   term.onData((data: string) => {
     if (termWs && termWs.readyState === WebSocket.OPEN) {
+      // 管道模式下本地回显（ConPTY/SSH 由远端回显）
+      if (pipeMode) {
+        if (data === '\r') {
+          term!.write('\r\n')
+        } else if (data === '\x7f' || data === '\x08') {
+          term!.write('\b \b')
+        } else if (data >= ' ') {
+          term!.write(data)
+        }
+      }
       termWs.send(data)
     }
   })
@@ -206,6 +217,7 @@ function connectTerminal() {
   if (!term) return
 
   termStatus.value = 'connecting'
+  pipeMode = false
   term.clear()
   term.writeln('\x1b[33m正在连接...\x1b[0m')
 
@@ -224,6 +236,19 @@ function connectTerminal() {
 
   termWs.onmessage = (ev) => {
     if (term && typeof ev.data === 'string') {
+      // 检查是否是 pty_mode JSON 消息
+      if (ev.data.startsWith('{')) {
+        try {
+          const msg = JSON.parse(ev.data)
+          if (msg.type === 'pty_mode') {
+            pipeMode = msg.mode === 'pipe'
+            if (pipeMode) {
+              term.writeln('\x1b[33m[管道模式 - 退格/箭头键可能受限]\x1b[0m')
+            }
+            return
+          }
+        } catch {}
+      }
       term.write(ev.data)
     }
   }

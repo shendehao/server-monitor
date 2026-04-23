@@ -80,6 +80,7 @@ func handlePtyStart(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage)
 			ptyManager.sessions[msg.ID] = session
 			ptyManager.mu.Unlock()
 			log.Printf("ConPTY 会话已启动: id=%s", msg.ID)
+			sendPtyStarted(conn, writeMu, msg.ID, "conpty")
 			go readConPTY(session, cpty, conn, writeMu, msg.ID)
 			return
 		}
@@ -157,6 +158,7 @@ func startPipeMode(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage) 
 	ptyManager.mu.Unlock()
 
 	log.Printf("管道模式会话已启动: id=%s", msg.ID)
+	sendPtyStarted(conn, writeMu, msg.ID, "pipe")
 
 	go func() {
 		defer func() {
@@ -249,6 +251,21 @@ func handlePtyClose(msg AgentMessage) {
 	} else if session.cpty != nil {
 		session.cpty.Close()
 	}
+}
+
+// sendPtyStarted 通知服务端 PTY 模式（conpty 或 pipe）
+func sendPtyStarted(conn *websocket.Conn, writeMu *sync.Mutex, sessionID string, mode string) {
+	payload, _ := json.Marshal(struct {
+		Mode string `json:"mode"`
+	}{Mode: mode})
+	msg, _ := json.Marshal(AgentMessage{
+		Type:    "pty_started",
+		ID:      sessionID,
+		Payload: payload,
+	})
+	writeMu.Lock()
+	conn.WriteMessage(websocket.TextMessage, msg)
+	writeMu.Unlock()
 }
 
 // pipeEcho 管道模式下将用户输入转为回显字符串

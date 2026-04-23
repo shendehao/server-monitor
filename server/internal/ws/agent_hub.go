@@ -43,6 +43,7 @@ type ExecResult struct {
 type TermSession struct {
 	OnOutput func(data string)
 	OnExit   func(code int)
+	OnMode   func(mode string) // "conpty" 或 "pipe"
 }
 
 // StressSession 压力测试会话回调
@@ -441,6 +442,17 @@ func (a *AgentConn) readPump() {
 				ch <- &result
 			}
 			a.pendingMu.Unlock()
+
+		case "pty_started":
+			var started struct {
+				Mode string `json:"mode"`
+			}
+			json.Unmarshal(msg.Payload, &started)
+			a.termSessionsMu.Lock()
+			if ts, ok := a.termSessions[msg.ID]; ok && ts.OnMode != nil {
+				ts.OnMode(started.Mode)
+			}
+			a.termSessionsMu.Unlock()
 
 		case "pty_output":
 			var out struct {

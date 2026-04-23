@@ -90,6 +90,12 @@ func (h *TerminalHandler) handleAgentTerminal(wsConn *gorillaws.Conn, server mod
 				close(done)
 			}
 		},
+		OnMode: func(mode string) {
+			modeMsg, _ := json.Marshal(map[string]string{"type": "pty_mode", "mode": mode})
+			wsMu.Lock()
+			wsConn.WriteMessage(gorillaws.TextMessage, modeMsg)
+			wsMu.Unlock()
+		},
 	}
 
 	// 启动 Agent PTY（默认 120x30，前端会马上发 resize）
