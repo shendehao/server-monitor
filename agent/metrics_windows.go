@@ -4,72 +4,171 @@ package main
 
 import (
 	"fmt"
-	"os/exec"
-	"strconv"
-	"strings"
+	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
-// hiddenExec 静默执行 PowerShell 命令，不弹出任何窗口
-func hiddenExec(args ...string) ([]byte, error) {
-	cmd := exec.Command("powershell", args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
-	return cmd.Output()
+// ─── Windows API DLL / Proc ─────────────────────────────────────────
+
+var (
+	modKernel32Metrics = syscall.NewLazyDLL("kernel32.dll")
+	modIphlpapi        = syscall.NewLazyDLL("iphlpapi.dll")
+	modPsapi           = syscall.NewLazyDLL("psapi.dll")
+
+	procGetSystemTimes          = modKernel32Metrics.NewProc("GetSystemTimes")
+	procGlobalMemoryStatusEx    = modKernel32Metrics.NewProc("GlobalMemoryStatusEx")
+	procGetLogicalDriveStringsW = modKernel32Metrics.NewProc("GetLogicalDriveStringsW")
+	procGetDriveTypeW           = modKernel32Metrics.NewProc("GetDriveTypeW")
+	procGetDiskFreeSpaceExW     = modKernel32Metrics.NewProc("GetDiskFreeSpaceExW")
+	procGetTickCount64          = modKernel32Metrics.NewProc("GetTickCount64")
+	procGetIfTable2             = modIphlpapi.NewProc("GetIfTable2")
+	procFreeMibTable            = modIphlpapi.NewProc("FreeMibTable")
+	procEnumProcesses           = modPsapi.NewProc("EnumProcesses")
+)
+
+// ─── CPU Usage (GetSystemTimes 差值法) ──────────────────────────────
+
+var (
+	cpuMu      sync.Mutex
+	prevIdle   uint64
+	prevKernel uint64
+	prevUser   uint64
+	cpuInited  bool
+)
+
+func fileTimeToUint64(ft syscall.Filetime) uint64 {
+	return uint64(ft.HighDateTime)<<32 | uint64(ft.LowDateTime)
 }
 
 func getCPUUsage() (float64, error) {
-	// 使用 PowerShell 获取 CPU 使用率
-	out, err := hiddenExec("-NoProfile", "-Command",
-		"(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average")
-	if err != nil {
-		return 0, err
+	var idleFt, kernelFt, userFt syscall.Filetime
+	r, _, e := procGetSystemTimes.Call(
+		uintptr(unsafe.Pointer(&idleFt)),
+		uintptr(unsafe.Pointer(&kernelFt)),
+		uintptr(unsafe.Pointer(&userFt)),
+	)
+	if r == 0 {
+		return 0, fmt.Errorf("GetSystemTimes: %v", e)
 	}
-	val, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-	if err != nil {
-		return 0, err
+
+	idle := fileTimeToUint64(idleFt)
+	kernel := fileTimeToUint64(kernelFt)
+	user := fileTimeToUint64(userFt)
+
+	cpuMu.Lock()
+	defer cpuMu.Unlock()
+
+	if !cpuInited {
+		prevIdle, prevKernel, prevUser = idle, kernel, user
+		cpuInited = true
+		time.Sleep(500 * time.Millisecond)
+		// 再采一次
+		procGetSystemTimes.Call(
+			uintptr(unsafe.Pointer(&idleFt)),
+			uintptr(unsafe.Pointer(&kernelFt)),
+			uintptr(unsafe.Pointer(&userFt)),
+		)
+		idle = fileTimeToUint64(idleFt)
+		kernel = fileTimeToUint64(kernelFt)
+		user = fileTimeToUint64(userFt)
 	}
-	return round2(val), nil
+
+	dIdle := idle - prevIdle
+	dKernel := kernel - prevKernel
+	dUser := user - prevUser
+	prevIdle, prevKernel, prevUser = idle, kernel, user
+
+	totalSys := dKernel + dUser // kernel 已包含 idle
+	if totalSys == 0 {
+		return 0, nil
+	}
+	// kernel time 包含 idle time，实际忙碌 = kernel - idle + user
+	busy := totalSys - dIdle
+	pct := float64(busy) * 100 / float64(totalSys)
+	return round2(pct), nil
+}
+
+// ─── Memory (GlobalMemoryStatusEx) ──────────────────────────────────
+
+type memoryStatusEx struct {
+	Length               uint32
+	MemoryLoad           uint32
+	TotalPhys            uint64
+	AvailPhys            uint64
+	TotalPageFile        uint64
+	AvailPageFile        uint64
+	TotalVirtual         uint64
+	AvailVirtual         uint64
+	AvailExtendedVirtual uint64
 }
 
 func getMemory() (total, used int64, usage float64) {
-	// 获取总内存 (MB)
-	outTotal, err := hiddenExec("-NoProfile", "-Command",
-		"[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)")
-	if err != nil {
+	var ms memoryStatusEx
+	ms.Length = uint32(unsafe.Sizeof(ms))
+	r, _, _ := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&ms)))
+	if r == 0 {
 		return
 	}
-	total, _ = strconv.ParseInt(strings.TrimSpace(string(outTotal)), 10, 64)
-
-	// 获取可用内存 (MB)
-	outFree, err := hiddenExec("-NoProfile", "-Command",
-		"[math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1KB)")
-	if err != nil {
-		return
-	}
-	free, _ := strconv.ParseInt(strings.TrimSpace(string(outFree)), 10, 64)
-
-	used = total - free
+	total = int64(ms.TotalPhys / (1024 * 1024)) // MB
+	avail := int64(ms.AvailPhys / (1024 * 1024))
+	used = total - avail
 	if total > 0 {
 		usage = round2(float64(used) * 100 / float64(total))
 	}
 	return
 }
+
+// ─── Disk (GetLogicalDriveStrings + GetDiskFreeSpaceEx) ─────────────
+
+const _DRIVE_FIXED = 3
 
 func getDisk() (total, used int64, usage float64) {
-	// 获取所有固定磁盘的容量和可用空间
-	out, err := hiddenExec("-NoProfile", "-Command",
-		"Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object { $_.Size,$_.FreeSpace } | ForEach-Object { [math]::Round($_ / 1GB) }")
-	if err != nil {
+	// 获取盘符列表
+	buf := make([]uint16, 256)
+	r, _, _ := procGetLogicalDriveStringsW.Call(
+		uintptr(len(buf)),
+		uintptr(unsafe.Pointer(&buf[0])),
+	)
+	if r == 0 {
 		return
 	}
-	lines := strings.Fields(strings.TrimSpace(string(out)))
-	// 输出成对: size, free, size, free, ...
-	for i := 0; i+1 < len(lines); i += 2 {
-		s, _ := strconv.ParseInt(lines[i], 10, 64)
-		f, _ := strconv.ParseInt(lines[i+1], 10, 64)
-		total += s
-		used += s - f
+
+	// buf 格式: "C:\\\0D:\\\0\0"
+	for i := 0; i < int(r); {
+		// 找当前字符串结尾
+		j := i
+		for j < int(r) && buf[j] != 0 {
+			j++
+		}
+		if j == i {
+			break
+		}
+		drive := syscall.UTF16ToString(buf[i:j])
+		i = j + 1
+
+		// 只统计固定磁盘
+		drivePtr, _ := syscall.UTF16PtrFromString(drive)
+		dt, _, _ := procGetDriveTypeW.Call(uintptr(unsafe.Pointer(drivePtr)))
+		if dt != _DRIVE_FIXED {
+			continue
+		}
+
+		var freeBytesAvail, totalBytes, totalFreeBytes uint64
+		r2, _, _ := procGetDiskFreeSpaceExW.Call(
+			uintptr(unsafe.Pointer(drivePtr)),
+			uintptr(unsafe.Pointer(&freeBytesAvail)),
+			uintptr(unsafe.Pointer(&totalBytes)),
+			uintptr(unsafe.Pointer(&totalFreeBytes)),
+		)
+		if r2 == 0 {
+			continue
+		}
+		gb := int64(totalBytes / (1024 * 1024 * 1024))
+		freeGb := int64(totalFreeBytes / (1024 * 1024 * 1024))
+		total += gb
+		used += gb - freeGb
 	}
 	if total > 0 {
 		usage = round2(float64(used) * 100 / float64(total))
@@ -77,83 +176,122 @@ func getDisk() (total, used int64, usage float64) {
 	return
 }
 
+// ─── Load Average (Windows 无此概念，用 CPU% 近似) ──────────────────
+
 func getLoadAvg() (l1, l5, l15 float64) {
-	// Windows 没有 load average，用 CPU 队列长度近似
-	out, err := hiddenExec("-NoProfile", "-Command",
-		"(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average")
+	cpu, err := getCPUUsage()
 	if err != nil {
 		return
 	}
-	val, _ := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-	// 归一化到 load average 风格 (0-1 per core)
-	l1 = round2(val / 100)
+	l1 = round2(cpu / 100)
 	l5 = l1
 	l15 = l1
 	return
 }
 
+// ─── Process Count (EnumProcesses) ──────────────────────────────────
+
 func getProcessCount() int {
-	out, err := hiddenExec("-NoProfile", "-Command",
-		"(Get-Process).Count")
-	if err != nil {
+	var pids [4096]uint32
+	var needed uint32
+	r, _, _ := procEnumProcesses.Call(
+		uintptr(unsafe.Pointer(&pids[0])),
+		uintptr(uint32(len(pids))*4),
+		uintptr(unsafe.Pointer(&needed)),
+	)
+	if r == 0 {
 		return 0
 	}
-	v, _ := strconv.Atoi(strings.TrimSpace(string(out)))
-	return v
+	return int(needed / 4)
 }
 
+// ─── Uptime (GetTickCount64) ────────────────────────────────────────
+
 func getUptime() string {
-	out, err := hiddenExec("-NoProfile", "-Command",
-		"((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds")
-	if err != nil {
-		return ""
-	}
-	secs, _ := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-	days := int(secs) / 86400
-	hours := (int(secs) % 86400) / 3600
+	r, _, _ := procGetTickCount64.Call()
+	ms := uint64(r)
+	secs := int(ms / 1000)
+	days := secs / 86400
+	hours := (secs % 86400) / 3600
 	return fmt.Sprintf("%d天%d小时", days, hours)
 }
 
-func getNetTraffic() (rxPerSec, txPerSec int64) {
-	cmd := `$a=Get-CimInstance Win32_PerfRawData_Tcpip_NetworkInterface | Where-Object {$_.Name -notlike '*Loopback*'};` +
-		`$rx=($a | Measure-Object -Property BytesReceivedPersec -Sum).Sum;` +
-		`$tx=($a | Measure-Object -Property BytesSentPersec -Sum).Sum;` +
-		`Start-Sleep -Seconds 1;` +
-		`$b=Get-CimInstance Win32_PerfRawData_Tcpip_NetworkInterface | Where-Object {$_.Name -notlike '*Loopback*'};` +
-		`$rx2=($b | Measure-Object -Property BytesReceivedPersec -Sum).Sum;` +
-		`$tx2=($b | Measure-Object -Property BytesSentPersec -Sum).Sum;` +
-		`"$($rx2-$rx),$($tx2-$tx)"`
+// ─── Network Traffic (GetIfTable2) ──────────────────────────────────
 
-	out, err := hiddenExec("-NoProfile", "-Command", cmd)
-	if err != nil {
+// MIB_IF_ROW2 精简版，只取需要的字段偏移
+// 完整结构体很大(1352字节)，我们只读 InOctets / OutOctets
+const _sizeofMibIfRow2 = 1352
+
+var (
+	netMu       sync.Mutex
+	prevRxTotal uint64
+	prevTxTotal uint64
+	prevNetTime time.Time
+	netInited   bool
+)
+
+func readIfTable() (rx, tx uint64) {
+	var pTable uintptr
+	r, _, _ := procGetIfTable2.Call(uintptr(unsafe.Pointer(&pTable)))
+	if r != 0 || pTable == 0 {
 		return
 	}
-	parts := strings.Split(strings.TrimSpace(string(out)), ",")
-	if len(parts) >= 2 {
-		rxPerSec, _ = strconv.ParseInt(parts[0], 10, 64)
-		txPerSec, _ = strconv.ParseInt(parts[1], 10, 64)
-	}
-	if rxPerSec < 0 {
-		rxPerSec = 0
-	}
-	if txPerSec < 0 {
-		txPerSec = 0
-	}
+	defer procFreeMibTable.Call(pTable)
 
-	// Windows PerfRawData 已经是每秒值，但两次采样差值更准确
-	// 如果差值为0但有流量，取绝对值
+	numEntries := *(*uint64)(unsafe.Pointer(pTable))
+	rowsBase := pTable + 8 // 跳过 NumEntries (ULONG64 on x64)
+
+	for i := uint64(0); i < numEntries; i++ {
+		rowPtr := rowsBase + uintptr(i)*_sizeofMibIfRow2
+
+		// Type 在偏移 168 (IFTYPE, ULONG)
+		ifType := *(*uint32)(unsafe.Pointer(rowPtr + 168))
+		// 跳过 loopback (type 24) 和 tunnel (type 131)
+		if ifType == 24 || ifType == 131 {
+			continue
+		}
+
+		// InOctets 在偏移 1288 (ULONG64)
+		inOctets := *(*uint64)(unsafe.Pointer(rowPtr + 1288))
+		// OutOctets 在偏移 1296 (ULONG64)
+		outOctets := *(*uint64)(unsafe.Pointer(rowPtr + 1296))
+
+		rx += inOctets
+		tx += outOctets
+	}
 	return
 }
 
-// Windows 没有信号处理的特殊需求，getCPUUsage 内部已有 sleep
-// 网络采集 PowerShell 内部已有 1 秒 sleep，不需要额外等待
-func init() {
-	// 确保 PowerShell 可用
-	_, err := exec.LookPath("powershell")
-	if err != nil {
-		fmt.Println("警告: 未找到 PowerShell，部分指标可能无法采集")
+func getNetTraffic() (rxPerSec, txPerSec int64) {
+	rxNow, txNow := readIfTable()
+
+	netMu.Lock()
+	defer netMu.Unlock()
+
+	now := time.Now()
+	if !netInited {
+		prevRxTotal, prevTxTotal = rxNow, txNow
+		prevNetTime = now
+		netInited = true
+		// 首次需要等一小段再采
+		time.Sleep(time.Second)
+		rxNow, txNow = readIfTable()
+		now = time.Now()
 	}
 
-	// 等待一小段时间让 WMI 初始化
-	time.Sleep(100 * time.Millisecond)
+	elapsed := now.Sub(prevNetTime).Seconds()
+	if elapsed < 0.5 {
+		elapsed = 1
+	}
+
+	if rxNow >= prevRxTotal {
+		rxPerSec = int64(float64(rxNow-prevRxTotal) / elapsed)
+	}
+	if txNow >= prevTxTotal {
+		txPerSec = int64(float64(txNow-prevTxTotal) / elapsed)
+	}
+
+	prevRxTotal, prevTxTotal = rxNow, txNow
+	prevNetTime = now
+	return
 }
