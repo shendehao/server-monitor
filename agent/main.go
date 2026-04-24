@@ -26,7 +26,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const AgentVersion = "3.0.0"
+const AgentVersion = "3.1.0"
 
 // 更新回滚：首次上报成功后确认更新
 var reportOK atomic.Bool
