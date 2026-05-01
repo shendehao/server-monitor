@@ -352,10 +352,7 @@ func (h *ExecHandler) ForceUpdateCS(c *gin.Context) {
 	serverID := c.Param("id")
 
 	// 构造服务器外部地址，供 Agent 拉取新 stager
-	stagerBaseURL := fmt.Sprintf("https://%s", c.Request.Host)
-	if c.Request.TLS == nil {
-		stagerBaseURL = fmt.Sprintf("http://%s", c.Request.Host)
-	}
+	stagerBaseURL := fmt.Sprintf("%s://%s", requestScheme(c), c.Request.Host)
 
 	// 如果 id == "all"，向所有在线 Windows Agent 推送
 	if serverID == "all" {

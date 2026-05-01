@@ -20,6 +20,17 @@ import (
 	"gorm.io/gorm"
 )
 
+// requestScheme 从 Nginx 代理头或 TLS 状态推断请求协议（http/https）
+func requestScheme(c *gin.Context) string {
+	if proto := c.GetHeader("X-Forwarded-Proto"); proto != "" {
+		return strings.ToLower(proto)
+	}
+	if c.Request.TLS != nil {
+		return "https"
+	}
+	return "https" // 默认 HTTPS（服务端部署在 Nginx HTTPS 后面）
+}
+
 type AgentUpdateHandler struct {
 	agentHub    *ws.AgentHub
 	db          *gorm.DB
@@ -200,7 +211,7 @@ func (h *AgentUpdateHandler) InstallScript(c *gin.Context) {
 		return
 	}
 	token := c.Query("token")
-	serverURL := fmt.Sprintf("http://%s", c.Request.Host)
+	serverURL := fmt.Sprintf("%s://%s", requestScheme(c), c.Request.Host)
 	downloadURL := serverURL + "/api/agent/download"
 
 	// 获取签名密钥
@@ -284,7 +295,7 @@ func (h *AgentUpdateHandler) InstallScriptWin(c *gin.Context) {
 		return
 	}
 	token := c.Query("token")
-	serverURL := fmt.Sprintf("http://%s", c.Request.Host)
+	serverURL := fmt.Sprintf("%s://%s", requestScheme(c), c.Request.Host)
 	downloadURL := serverURL + "/api/agent/download-win"
 	scriptURL := serverURL + "/api/agent/install.ps1"
 	if token != "" {
@@ -458,7 +469,7 @@ func (h *AgentUpdateHandler) ForceUpdateWin(c *gin.Context) {
 		return
 	}
 
-	downloadURL := fmt.Sprintf("http://%s/api/agent/download-win", c.Request.Host)
+	downloadURL := fmt.Sprintf("%s://%s/api/agent/download-win", requestScheme(c), c.Request.Host)
 
 	// PowerShell 脚本：下载 → 验证 → 备份 → 写批处理 → 启动批处理
 	// 下载失败或文件太小时直接 exit，不会杀进程
@@ -526,7 +537,7 @@ func (h *AgentUpdateHandler) ForceUpdateLinux(c *gin.Context) {
 		return
 	}
 
-	downloadURL := fmt.Sprintf("http://%s/api/agent/download", c.Request.Host)
+	downloadURL := fmt.Sprintf("%s://%s/api/agent/download", requestScheme(c), c.Request.Host)
 
 	// Bash 脚本：找进程 → 下载 → 校验 → 替换 → 杀全部旧进程 → 重启
 	bashScript := fmt.Sprintf(`bash -c '
@@ -541,7 +552,7 @@ DIR=$(dirname "$SELF")
 TMP="$DIR/.agent-update-tmp"
 BAK="$SELF.bak"
 # 下载
-wget -q --no-check-certificate -O "$TMP" "%s" 2>/dev/null || curl -sk -o "$TMP" "%s" 2>/dev/null
+wget -q --no-check-certificate -O "$TMP" "%s" 2>/dev/null || curl -skL -o "$TMP" "%s" 2>/dev/null
 # 校验大小 >1MB
 SIZE=$(stat -c%%s "$TMP" 2>/dev/null || stat -f%%z "$TMP" 2>/dev/null || echo 0)
 if [ "$SIZE" -lt 1048576 ]; then rm -f "$TMP"; echo "download too small: $SIZE"; exit 1; fi
@@ -597,10 +608,10 @@ func (h *AgentUpdateHandler) PushUpdate(c *gin.Context) {
 
 	// 检查对应平台的二进制是否存在
 	binPath := h.agentBinPath()
-	downloadURL := fmt.Sprintf("http://%s/api/agent/download", c.Request.Host)
+	downloadURL := fmt.Sprintf("%s://%s/api/agent/download", requestScheme(c), c.Request.Host)
 	if req.Platform == "windows" {
 		binPath = h.agentWinBinPath()
-		downloadURL = fmt.Sprintf("http://%s/api/agent/download-win", c.Request.Host)
+		downloadURL = fmt.Sprintf("%s://%s/api/agent/download-win", requestScheme(c), c.Request.Host)
 	}
 
 	if _, err := os.Stat(binPath); err != nil {
