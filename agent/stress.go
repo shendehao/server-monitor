@@ -1607,7 +1607,7 @@ func makeProgress(sent int64, totalSuccess, totalErrors, totalBlocked, totalLate
 func sendStressMsg(conn *websocket.Conn, writeMu *sync.Mutex, msgType, taskID string, progress StressProgress) {
 	payload, _ := json.Marshal(progress)
 	msg, _ := json.Marshal(AgentMessage{
-		Type:    msgType,
+		Type:    c2e(msgType),
 		ID:      taskID,
 		Payload: payload,
 	})

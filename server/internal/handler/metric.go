@@ -15,10 +15,11 @@ import (
 type MetricHandler struct {
 	db        *gorm.DB
 	collector *service.Collector
+	geoip     *service.GeoIP
 }
 
 func NewMetricHandler(db *gorm.DB, collector *service.Collector) *MetricHandler {
-	return &MetricHandler{db: db, collector: collector}
+	return &MetricHandler{db: db, collector: collector, geoip: service.NewGeoIP()}
 }
 
 var serverColors = map[string]string{
@@ -67,6 +68,8 @@ func (h *MetricHandler) Overview(c *gin.Context) {
 		summaries = append(summaries, model.ServerSummary{
 			ID:           s.ID,
 			Name:         s.Name,
+			Host:         s.Host,
+			CountryCode:  h.geoip.Lookup(s.Host),
 			IsOnline:     isOnline,
 			CPUUsage:     cpu,
 			MemUsage:     mem,

@@ -7,6 +7,7 @@
   >
     <div class="scard-top">
       <span class="status-dot" :class="statusClass"></span>
+      <span v-if="flag" class="scard-flag">{{ flag }}</span>
       <span class="scard-name">{{ server.name }}</span>
       <span class="scard-tag" :class="statusClass">{{ statusLabel }}</span>
     </div>
@@ -38,13 +39,18 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import * as echarts from 'echarts'
 import type { ServerSummary } from '@/api'
-
 const props = defineProps<{ server: ServerSummary }>()
 const router = useRouter()
 const gaugeRef = ref<HTMLElement>()
 let chart: echarts.ECharts | null = null
 const handleResize = () => chart?.resize()
 
+function ccToFlag(cc: string): string {
+  if (!cc || cc.length !== 2) return ''
+  const base = 0x1F1E6 - 65
+  return String.fromCodePoint(cc.charCodeAt(0) + base, cc.charCodeAt(1) + base)
+}
+const flag = computed(() => ccToFlag(props.server.countryCode || ''))
 const statusClass = computed(() => props.server.isOnline ? props.server.status : 'offline')
 const statusLabel = computed(() => {
   const m: Record<string, string> = { normal: '正常', warning: '警告', danger: '危险', offline: '离线' }
@@ -170,6 +176,12 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.scard-flag {
+  font-size: 15px;
+  line-height: 1;
+  flex-shrink: 0;
 }
 
 .scard-name {

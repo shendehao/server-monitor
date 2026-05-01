@@ -6,13 +6,25 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 )
 
-// setupLogging 禁用所有本地日志输出，不产生任何日志文件
+// setupLogging 将日志写入 agent 同目录的 agent.log（方便排查启动/连接问题）
 func setupLogging() {
-	log.SetOutput(io.Discard)
-	log.SetFlags(0)
+	selfPath, err := os.Executable()
+	if err != nil {
+		log.SetOutput(io.Discard)
+		return
+	}
+	logPath := fmt.Sprintf("%s%c%s", filepath.Dir(selfPath), os.PathSeparator, "agent.log")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.SetOutput(io.Discard)
+		return
+	}
+	log.SetOutput(f)
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 }
 
 // spawnWatchdog 启动一个看门狗子进程用于互相监控

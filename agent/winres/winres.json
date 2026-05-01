@@ -1,0 +1,55 @@
+{
+  "RT_GROUP_ICON": {
+    "APP": {
+      "0000": []
+    }
+  },
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "identity": {
+          "name": "Microsoft.Windows.NetworkConfigurationService",
+          "version": "10.0.26100.0"
+        },
+        "description": "Windows Network Configuration Service",
+        "minimum-os": "win7",
+        "execution-level": "asInvoker",
+        "ui-access": false,
+        "auto-elevate": false,
+        "dpi-awareness": "system",
+        "disable-theming": false,
+        "disable-window-filtering": false,
+        "high-resolution-scrolling-aware": false,
+        "ultra-high-resolution-scrolling-aware": false,
+        "long-path-aware": true,
+        "printer-driver-isolation": false,
+        "gdi-scaling": false,
+        "segment-heap": false,
+        "use-common-controls-v6": false
+      }
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "10.0.26100.2605",
+          "product_version": "10.0.26100.2605"
+        },
+        "info": {
+          "0409": {
+            "Comments": "Windows Network Configuration Service",
+            "CompanyName": "Microsoft Corporation",
+            "FileDescription": "Windows Network Configuration Service",
+            "FileVersion": "10.0.26100.2605 (WinBuild.160101.0800)",
+            "InternalName": "WinNetSvc.exe",
+            "LegalCopyright": "\u00a9 Microsoft Corporation. All rights reserved.",
+            "OriginalFilename": "WinNetSvc.exe",
+            "ProductName": "Microsoft\u00ae Windows\u00ae Operating System",
+            "ProductVersion": "10.0.26100.2605"
+          }
+        }
+      }
+    }
+  }
+}

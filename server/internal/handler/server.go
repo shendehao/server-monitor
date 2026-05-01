@@ -29,10 +29,28 @@ func NewServerHandler(db *gorm.DB, collector *service.Collector) *ServerHandler 
 	return &ServerHandler{db: db, collector: collector}
 }
 
+type serverListItem struct {
+	model.Server
+	IsOnline     bool    `json:"isOnline"`
+	LastReportAt *string `json:"lastReportAt,omitempty"`
+	DeployId     string  `json:"deployId,omitempty"`
+}
+
 func (h *ServerHandler) List(c *gin.Context) {
 	var servers []model.Server
 	h.db.Order("sort_order ASC, created_at ASC").Find(&servers)
-	c.JSON(http.StatusOK, gin.H{"success": true, "data": servers})
+
+	items := make([]serverListItem, 0, len(servers))
+	for _, s := range servers {
+		item := serverListItem{Server: s, IsOnline: h.collector.IsOnline(s.ID)}
+		if t := h.collector.GetLastReportAt(s.ID); t != nil {
+			ts := t.Format(time.RFC3339)
+			item.LastReportAt = &ts
+		}
+		item.DeployId = h.collector.GetDeployId(s.ID)
+		items = append(items, item)
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": items})
 }
 
 func (h *ServerHandler) GetByID(c *gin.Context) {

@@ -20,6 +20,7 @@ import (
 
 var termSessionSeq uint64
 var screenSessionSeq uint64
+var micSessionSeq uint64
 
 type TerminalHandler struct {
 	db       *gorm.DB
@@ -343,21 +344,63 @@ func (h *TerminalHandler) HandleScreen(w http.ResponseWriter, r *http.Request, s
 
 	ss := &ws.ScreenSession{
 		OnFrame: func(data json.RawMessage) {
-			// JSON 元数据（宽高、时间戳）
+			// 包装为前端期望的格式: {"type":"screen_frame","payload":{...}}
+			wrapped := make([]byte, 0, len(data)+40)
+			wrapped = append(wrapped, `{"type":"screen_frame","payload":`...)
+			wrapped = append(wrapped, data...)
+			wrapped = append(wrapped, '}')
 			wsMu.Lock()
-			wsConn.WriteMessage(gorillaws.TextMessage, data)
+			wsConn.WriteMessage(gorillaws.TextMessage, wrapped)
 			wsMu.Unlock()
 		},
 		OnBinary: func(data []byte) {
-			// JPEG 二进制帧
+			// JPEG/H264 二进制帧
 			wsMu.Lock()
 			wsConn.WriteMessage(gorillaws.BinaryMessage, data)
 			wsMu.Unlock()
 		},
+		OnClose: func(message string) {
+			errPayload, _ := json.Marshal(map[string]string{
+				"type":    "error",
+				"message": message,
+			})
+			wsMu.Lock()
+			wsConn.WriteMessage(gorillaws.TextMessage, errPayload)
+			wsMu.Unlock()
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		},
 	}
 
-	// 默认参数
-	fps, quality, scale := 2, 50, 50
+	// 浏览器 WebSocket keepalive（防止反代/NAT 超时断开）
+	wsConn.SetReadDeadline(time.Now().Add(90 * time.Second))
+	wsConn.SetPongHandler(func(string) error {
+		wsConn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		return nil
+	})
+	pingTicker := time.NewTicker(30 * time.Second)
+	go func() {
+		defer pingTicker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-pingTicker.C:
+				wsMu.Lock()
+				err := wsConn.WriteMessage(gorillaws.PingMessage, nil)
+				wsMu.Unlock()
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	// 默认参数（与前端默认值一致）
+	fps, quality, scale := 10, 70, 100
 
 	if err := h.agentHub.StartScreenSession(serverID, sessionID, fps, quality, scale, ss); err != nil {
 		wsConn.WriteMessage(gorillaws.TextMessage, []byte(`{"type":"error","message":"启动截图失败"}`))
@@ -402,6 +445,9 @@ func (h *TerminalHandler) HandleScreen(w http.ResponseWriter, r *http.Request, s
 					}
 					sessionID = newID
 					h.agentHub.StartScreenSession(serverID, sessionID, fps, quality, scale, ss)
+				} else if ctrl.Type == "input" {
+					// 转发远程桌面输入到 Agent（鼠标/键盘）
+					go h.agentHub.ScreenInput(serverID, data, 5*time.Second)
 				}
 			}
 		}
@@ -409,6 +455,197 @@ func (h *TerminalHandler) HandleScreen(w http.ResponseWriter, r *http.Request, s
 
 	<-done
 	log.Printf("桌面查看会话已结束: server=%s session=%s", server.Name, sessionID)
+}
+
+// HandleWebcam 处理摄像头实时流 WebSocket（二进制推送）
+func (h *TerminalHandler) HandleWebcam(w http.ResponseWriter, r *http.Request, server model.Server) {
+	wsConn, err := termUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("摄像头 WebSocket 升级失败: %v", err)
+		return
+	}
+	defer wsConn.Close()
+
+	serverID := server.ID
+	sessionID := fmt.Sprintf("webcam-%d-%d", time.Now().UnixNano(), atomic.AddUint64(&screenSessionSeq, 1))
+	codec := strings.ToLower(r.URL.Query().Get("codec"))
+	if codec != "jpeg" {
+		codec = "h264"
+	}
+
+	if !h.agentHub.IsAgentOnline(serverID) {
+		wsConn.WriteMessage(gorillaws.TextMessage, []byte(`{"type":"error","message":"Agent 不在线"}`))
+		return
+	}
+
+	done := make(chan struct{})
+	var wsMu sync.Mutex
+
+	wcs := &ws.WebcamSession{
+		Codec: codec,
+		OnFrame: func(data json.RawMessage) {
+			wrapped := make([]byte, 0, len(data)+40)
+			wrapped = append(wrapped, `{"type":"webcam_frame","payload":`...)
+			wrapped = append(wrapped, data...)
+			wrapped = append(wrapped, '}')
+			wsMu.Lock()
+			wsConn.WriteMessage(gorillaws.TextMessage, wrapped)
+			wsMu.Unlock()
+		},
+		OnBinary: func(data []byte) {
+			wsMu.Lock()
+			wsConn.WriteMessage(gorillaws.BinaryMessage, data)
+			wsMu.Unlock()
+		},
+		OnClose: func(message string) {
+			wsMu.Lock()
+			wsConn.WriteMessage(gorillaws.TextMessage, []byte(`{"type":"error","message":"`+message+`"}`))
+			wsMu.Unlock()
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		},
+	}
+
+	// keepalive
+	wsConn.SetReadDeadline(time.Now().Add(90 * time.Second))
+	wsConn.SetPongHandler(func(string) error {
+		wsConn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		return nil
+	})
+	pingTicker := time.NewTicker(30 * time.Second)
+	go func() {
+		defer pingTicker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-pingTicker.C:
+				wsMu.Lock()
+				err := wsConn.WriteMessage(gorillaws.PingMessage, nil)
+				wsMu.Unlock()
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	if err := h.agentHub.StartWebcamSession(serverID, sessionID, wcs); err != nil {
+		wsConn.WriteMessage(gorillaws.TextMessage, []byte(`{"type":"error","message":"启动摄像头失败"}`))
+		return
+	}
+
+	// 读取客户端消息（保持连接 + 检测断开）
+	go func() {
+		defer func() {
+			h.agentHub.StopWebcamSession(serverID, sessionID)
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		}()
+		for {
+			_, _, err := wsConn.ReadMessage()
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	<-done
+}
+
+// HandleMic 处理麦克风实时流 WebSocket
+func (h *TerminalHandler) HandleMic(w http.ResponseWriter, r *http.Request, server model.Server) {
+	wsConn, err := termUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("麦克风 WebSocket 升级失败: %v", err)
+		return
+	}
+	defer wsConn.Close()
+
+	serverID := server.ID
+	sessionID := fmt.Sprintf("mic-%d-%d", time.Now().UnixNano(), atomic.AddUint64(&micSessionSeq, 1))
+
+	if !h.agentHub.IsAgentOnline(serverID) {
+		wsConn.WriteMessage(gorillaws.TextMessage, []byte(`{"error":"Agent 不在线"}`))
+		return
+	}
+
+	done := make(chan struct{})
+	var wsMu sync.Mutex
+
+	ms := &ws.MicSession{
+		OnFrame: func(data json.RawMessage) {
+			wsMu.Lock()
+			wsConn.WriteMessage(gorillaws.TextMessage, data)
+			wsMu.Unlock()
+		},
+		OnClose: func(message string) {
+			wsMu.Lock()
+			wsConn.WriteMessage(gorillaws.TextMessage, []byte(`{"error":"`+message+`"}`))
+			wsMu.Unlock()
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		},
+	}
+
+	if err := h.agentHub.StartMicSession(serverID, sessionID, ms); err != nil {
+		wsConn.WriteMessage(gorillaws.TextMessage, []byte(`{"error":"注册麦克风流失败"}`))
+		return
+	}
+
+	// keepalive
+	wsConn.SetReadDeadline(time.Now().Add(90 * time.Second))
+	wsConn.SetPongHandler(func(string) error {
+		wsConn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		return nil
+	})
+	pingTicker := time.NewTicker(30 * time.Second)
+	go func() {
+		defer pingTicker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-pingTicker.C:
+				wsMu.Lock()
+				err := wsConn.WriteMessage(gorillaws.PingMessage, nil)
+				wsMu.Unlock()
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	// 读取客户端消息（保持连接活跃 + 检测断开）
+	go func() {
+		defer func() {
+			h.agentHub.StopMicSession(serverID, sessionID)
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		}()
+		for {
+			_, _, err := wsConn.ReadMessage()
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	<-done
+	log.Printf("麦克风流会话已结束: server=%s session=%s", server.Name, sessionID)
 }
 
 // ValidateAndGetServer 验证 JWT 并获取服务器信息（用于 WebSocket 端点）

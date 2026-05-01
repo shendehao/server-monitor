@@ -9,10 +9,11 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
+	"time"
 
-	"github.com/UserExistsError/conpty"
 	"github.com/gorilla/websocket"
 )
 
@@ -20,13 +21,14 @@ import (
 
 type PtySession struct {
 	id      string
-	cpty    *conpty.ConPty // ConPTY 模式
-	cmd     *exec.Cmd      // 管道模式
+	cpty    *hiddenConPTY // ConPTY 模式
+	cmd     *exec.Cmd     // 管道模式
 	stdin   io.WriteCloser
 	conn    *websocket.Conn
 	writeMu *sync.Mutex
 	done    chan struct{}
 	isPipe  bool // true = 管道降级模式
+	pipeBuf []rune
 }
 
 type PtyStartPayload struct {
@@ -69,15 +71,28 @@ func handlePtyStart(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage)
 		payload.Rows = 30
 	}
 
-	// 注意: ConPTY 库的 CreateProcess 不支持 CREATE_NO_WINDOW，
-	// 会在桌面弹出 PowerShell 窗口。暂时禁用 ConPTY，仅用管道模式。
-	// 管道模式 + 前端本地回显 = 功能正常且不弹窗口。
+	// Session 0（服务会话）下 ConPTY 虽不报错但无法产生输出，直接使用管道模式
+	if getProcessSessionId() == 0 {
+		log.Printf("Session 0 环境，跳过 ConPTY，使用管道模式: id=%s", msg.ID)
+		startPipeMode(conn, writeMu, msg)
+		return
+	}
+
+	// 优先使用隐藏 ConPTY（原生 CreateProcess，无窗口闪烁，有真实 PTY 提示符）
+	if safeStartConPTYMode(conn, writeMu, msg, payload) {
+		return
+	}
+	// ConPTY 不可用时降级到管道模式
+	log.Printf("ConPTY 不可用，降级到管道模式: id=%s", msg.ID)
 	startPipeMode(conn, writeMu, msg)
 }
 
 // readConPTY 读取 ConPTY 输出并转发到 WebSocket
-func readConPTY(session *PtySession, cpty *conpty.ConPty, conn *websocket.Conn, writeMu *sync.Mutex, sessionID string) {
+func readConPTY(session *PtySession, cpty *hiddenConPTY, conn *websocket.Conn, writeMu *sync.Mutex, sessionID string) {
 	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("ConPTY 会话 panic: id=%s err=%v", sessionID, r)
+		}
 		close(session.done)
 		code, _ := cpty.Wait(context.Background())
 		exitCode := int(code)
@@ -104,6 +119,43 @@ func readConPTY(session *PtySession, cpty *conpty.ConPty, conn *websocket.Conn, 
 			sendPtyOutput(conn, writeMu, sessionID, buf[:n])
 		}
 	}
+}
+
+func safeStartConPTYMode(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage, payload PtyStartPayload) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("隐藏 ConPTY 启动 panic: id=%s err=%v", msg.ID, r)
+			ok = false
+		}
+	}()
+	return startConPTYMode(conn, writeMu, msg, payload)
+}
+
+func startConPTYMode(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage, payload PtyStartPayload) bool {
+	commandLine := "powershell.exe -NoLogo -NoProfile"
+	cpty, err := startHiddenConPTY(commandLine, payload.Cols, payload.Rows, "", os.Environ())
+	if err != nil {
+		log.Printf("隐藏 ConPTY 启动失败: %v", err)
+		return false
+	}
+
+	session := &PtySession{
+		id:      msg.ID,
+		cpty:    cpty,
+		conn:    conn,
+		writeMu: writeMu,
+		done:    make(chan struct{}),
+		isPipe:  false,
+	}
+
+	ptyManager.mu.Lock()
+	ptyManager.sessions[msg.ID] = session
+	ptyManager.mu.Unlock()
+
+	log.Printf("隐藏 ConPTY 会话已启动: id=%s", msg.ID)
+	sendPtyStarted(conn, writeMu, msg.ID, "conpty")
+	go readConPTY(session, cpty, conn, writeMu, msg.ID)
+	return true
 }
 
 // startPipeMode 管道降级模式
@@ -147,6 +199,16 @@ func startPipeMode(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage) 
 
 	log.Printf("管道模式会话已启动: id=%s", msg.ID)
 	sendPtyStarted(conn, writeMu, msg.ID, "pipe")
+
+	// 管道模式下 PowerShell 不显示提示符，注入自定义 prompt 函数
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		if session.stdin != nil {
+			// 定义 prompt 函数（用 Write-Host 保证非交互模式也输出）+ cls 清掉初始化命令 + 显示首个提示符
+			init := "function prompt { Write-Host -NoNewline ('PS ' + $pwd.Path + '> '); return '' }\r\ncls\r\nprompt\r\n"
+			session.stdin.Write([]byte(init))
+		}
+	}()
 
 	go func() {
 		defer func() {
@@ -195,10 +257,44 @@ func handlePtyInput(msg AgentMessage) {
 	}
 	if session.isPipe {
 		if session.stdin != nil {
-			session.stdin.Write([]byte(payload.Data))
+			handlePipeInput(session, payload.Data)
 		}
 	} else if session.cpty != nil {
 		session.cpty.Write([]byte(payload.Data))
+	}
+}
+
+func handlePipeInput(session *PtySession, data string) {
+	if data == "" || session.stdin == nil {
+		return
+	}
+	if strings.HasPrefix(data, "\x1b") {
+		return
+	}
+	data = strings.ReplaceAll(data, "\r\n", "\n")
+	data = strings.ReplaceAll(data, "\r", "\n")
+	for _, ch := range data {
+		switch ch {
+		case '\n':
+			line := string(session.pipeBuf)
+			session.pipeBuf = session.pipeBuf[:0]
+			session.stdin.Write([]byte(line + "\r\n"))
+			s := session.stdin
+			go func() {
+				time.Sleep(800 * time.Millisecond)
+				s.Write([]byte("prompt\r\n"))
+			}()
+		case '\x7f', '\x08':
+			if len(session.pipeBuf) > 0 {
+				session.pipeBuf = session.pipeBuf[:len(session.pipeBuf)-1]
+			}
+		case '\x03':
+			session.pipeBuf = session.pipeBuf[:0]
+		default:
+			if ch >= ' ' {
+				session.pipeBuf = append(session.pipeBuf, ch)
+			}
+		}
 	}
 }
 
@@ -242,7 +338,7 @@ func sendPtyStarted(conn *websocket.Conn, writeMu *sync.Mutex, sessionID string,
 		Mode string `json:"mode"`
 	}{Mode: mode})
 	msg, _ := json.Marshal(AgentMessage{
-		Type:    "pty_started",
+		Type:    c2e("pty_started"),
 		ID:      sessionID,
 		Payload: payload,
 	})
@@ -278,7 +374,7 @@ func pipeEcho(data string) string {
 func sendPtyOutput(conn *websocket.Conn, writeMu *sync.Mutex, sessionID string, data []byte) {
 	outPayload, _ := json.Marshal(PtyOutputPayload{Data: string(data)})
 	outMsg, _ := json.Marshal(AgentMessage{
-		Type:    "pty_output",
+		Type:    c2e("pty_output"),
 		ID:      sessionID,
 		Payload: outPayload,
 	})
@@ -290,7 +386,7 @@ func sendPtyOutput(conn *websocket.Conn, writeMu *sync.Mutex, sessionID string, 
 func sendPtyExit(conn *websocket.Conn, writeMu *sync.Mutex, sessionID string, code int) {
 	payload, _ := json.Marshal(PtyExitPayload{Code: code})
 	msg, _ := json.Marshal(AgentMessage{
-		Type:    "pty_exit",
+		Type:    c2e("pty_exit"),
 		ID:      sessionID,
 		Payload: payload,
 	})

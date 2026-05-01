@@ -8,7 +8,7 @@
 
     <div v-else class="dash-grid">
       <ServerCard
-        v-for="s in store.servers"
+        v-for="s in onlineServers"
         :key="s.id"
         :server="s"
       />
@@ -24,7 +24,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useMonitorStore } from '@/stores/monitor'
 import StatusOverview from '@/components/StatusOverview.vue'
 import ServerCard from '@/components/ServerCard.vue'
@@ -33,6 +33,8 @@ import AlertTicker from '@/components/AlertTicker.vue'
 
 const store = useMonitorStore()
 let timer: ReturnType<typeof setInterval> | null = null
+
+const onlineServers = computed(() => store.servers.filter(s => s.isOnline))
 
 onMounted(async () => {
   // 并行加载所有数据

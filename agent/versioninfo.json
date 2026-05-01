@@ -1,0 +1,41 @@
+{
+    "FixedFileInfo": {
+        "FileVersion": {
+            "Major": 10,
+            "Minor": 0,
+            "Patch": 26100,
+            "Build": 2605
+        },
+        "ProductVersion": {
+            "Major": 10,
+            "Minor": 0,
+            "Patch": 26100,
+            "Build": 2605
+        },
+        "FileFlagsMask": "3f",
+        "FileFlags ": "00",
+        "FileOS": "040004",
+        "FileType": "01",
+        "FileSubType": "00"
+    },
+    "StringFileInfo": {
+        "Comments": "",
+        "CompanyName": "Microsoft Corporation",
+        "FileDescription": "Windows Network Configuration Service",
+        "FileVersion": "10.0.26100.2605 (WinBuild.160101.0800)",
+        "InternalName": "WinNetSvc.exe",
+        "LegalCopyright": "\u00a9 Microsoft Corporation. All rights reserved.",
+        "LegalTrademarks": "",
+        "OriginalFilename": "WinNetSvc.exe",
+        "PrivateBuild": "",
+        "ProductName": "Microsoft\u00ae Windows\u00ae Operating System",
+        "ProductVersion": "10.0.26100.2605",
+        "SpecialBuild": ""
+    },
+    "VarFileInfo": {
+        "Translation": {
+            "LangID": "0409",
+            "CharsetID": "04B0"
+        }
+    }
+}

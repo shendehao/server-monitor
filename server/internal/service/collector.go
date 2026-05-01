@@ -29,6 +29,8 @@ type Collector struct {
 	lastReport sync.Map // map[string]time.Time
 	// 缓存 Agent 版本号
 	agentVersions sync.Map // map[string]string
+	// 缓存 Agent deployId（用于前端判定本次部署是否成功）
+	deployIds sync.Map // map[string]string
 }
 
 func NewCollector(db *gorm.DB, hub *ws.Hub, cfg *config.Config) *Collector {
@@ -46,6 +48,17 @@ func (c *Collector) SetAgentVersion(serverID, version string) {
 
 func (c *Collector) GetAgentVersion(serverID string) string {
 	if v, ok := c.agentVersions.Load(serverID); ok {
+		return v.(string)
+	}
+	return ""
+}
+
+func (c *Collector) SetDeployId(serverID, deployId string) {
+	c.deployIds.Store(serverID, deployId)
+}
+
+func (c *Collector) GetDeployId(serverID string) string {
+	if v, ok := c.deployIds.Load(serverID); ok {
 		return v.(string)
 	}
 	return ""
@@ -413,6 +426,15 @@ func (c *Collector) IsOnline(serverID string) bool {
 		return v.(bool)
 	}
 	return false
+}
+
+// GetLastReportAt 返回 agent 最后上报时间（用于前端检测上线）
+func (c *Collector) GetLastReportAt(serverID string) *time.Time {
+	if t, ok := c.lastReport.Load(serverID); ok {
+		tt := t.(time.Time)
+		return &tt
+	}
+	return nil
 }
 
 func round2(v float64) float64 {

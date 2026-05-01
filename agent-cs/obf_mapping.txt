@@ -1,0 +1,2 @@
+NAMESPACE=_NkVWxehwp
+ENTRY_CLASS=_CbUoPc

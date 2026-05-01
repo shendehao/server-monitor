@@ -34,6 +34,8 @@ type Overview struct {
 type ServerSummary struct {
 	ID           string  `json:"id"`
 	Name         string  `json:"name"`
+	Host         string  `json:"host,omitempty"`
+	CountryCode  string  `json:"countryCode,omitempty"`
 	IsOnline     bool    `json:"isOnline"`
 	CPUUsage     float64 `json:"cpuUsage"`
 	MemUsage     float64 `json:"memUsage"`

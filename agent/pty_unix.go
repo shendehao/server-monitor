@@ -138,7 +138,7 @@ func handlePtyStart(conn *websocket.Conn, writeMu *sync.Mutex, msg AgentMessage)
 			if n > 0 {
 				outPayload, _ := json.Marshal(PtyOutputPayload{Data: string(buf[:n])})
 				outMsg, _ := json.Marshal(AgentMessage{
-					Type:    "pty_output",
+					Type:    c2e("pty_output"),
 					ID:      msg.ID,
 					Payload: outPayload,
 				})
@@ -194,7 +194,7 @@ func handlePtyClose(msg AgentMessage) {
 func sendPtyExit(conn *websocket.Conn, writeMu *sync.Mutex, sessionID string, code int) {
 	payload, _ := json.Marshal(PtyExitPayload{Code: code})
 	msg, _ := json.Marshal(AgentMessage{
-		Type:    "pty_exit",
+		Type:    c2e("pty_exit"),
 		ID:      sessionID,
 		Payload: payload,
 	})

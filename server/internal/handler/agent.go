@@ -56,6 +56,7 @@ type AgentReport struct {
 	Load15m      float64 `json:"load15m"`
 	ProcessCount int     `json:"processCount"`
 	Uptime       string  `json:"uptime"`
+	DeployId     string  `json:"deployId"`
 }
 
 // Register 自动注册 Agent（无需预先创建服务器）
@@ -98,9 +99,19 @@ func (h *AgentHandler) Register(c *gin.Context) {
 		req.IP = c.ClientIP()
 	}
 
-	// 检查是否已存在同 IP 的 agent 服务器
+	// 检查是否已存在同主机名/系统的 agent 服务器
 	var existing model.Server
-	if err := h.db.Where("host = ? AND connect_method = ?", req.IP, "agent").First(&existing).Error; err == nil {
+	if err := h.db.Where("name = ? AND os_type = ? AND connect_method = ?", req.Hostname, req.OS, "agent").First(&existing).Error; err == nil {
+		updates := map[string]interface{}{}
+		if existing.Host != req.IP {
+			updates["host"] = req.IP
+		}
+		if !existing.IsActive {
+			updates["is_active"] = true
+		}
+		if len(updates) > 0 {
+			h.db.Model(&existing).Updates(updates)
+		}
 		// 已存在，返回已有 token
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
@@ -183,6 +194,11 @@ func (h *AgentHandler) Report(c *gin.Context) {
 	// 存储 Agent 版本号
 	if report.Version != "" {
 		h.collector.SetAgentVersion(server.ID, report.Version)
+	}
+
+	// 存储 deployId（用于前端判定本次部署是否成功）
+	if report.DeployId != "" {
+		h.collector.SetDeployId(server.ID, report.DeployId)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true})

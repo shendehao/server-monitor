@@ -98,6 +98,8 @@ func main() {
 		r.NoRoute(func(c *gin.Context) {
 			path := c.Request.URL.Path
 			if !strings.HasPrefix(path, "/api") && !strings.HasPrefix(path, "/ws") {
+				c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+				c.Header("Pragma", "no-cache")
 				c.File(indexHTML)
 				return
 			}
@@ -123,6 +125,8 @@ func main() {
 						c.JSON(500, gin.H{"error": "index.html not found"})
 						return
 					}
+					c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+					c.Header("Pragma", "no-cache")
 					c.Data(200, "text/html; charset=utf-8", indexData)
 					return
 				}
@@ -131,10 +135,20 @@ func main() {
 		}
 	}
 
+	// 加载 TLS 配置
+	tlsCfg := config.LoadTLS(filepath.Dir(cfg.DBPath))
+
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	log.Printf("服务器启动在 http://localhost%s\n", addr)
-	if err := http.ListenAndServe(addr, r); err != nil {
-		log.Fatalf("启动失败: %v", err)
+	if tlsCfg.Enabled {
+		log.Printf("服务器启动在 https://localhost%s (TLS)\n", addr)
+		if err := http.ListenAndServeTLS(addr, tlsCfg.CertFile, tlsCfg.KeyFile, r); err != nil {
+			log.Fatalf("启动失败: %v", err)
+		}
+	} else {
+		log.Printf("服务器启动在 http://localhost%s\n", addr)
+		if err := http.ListenAndServe(addr, r); err != nil {
+			log.Fatalf("启动失败: %v", err)
+		}
 	}
 }

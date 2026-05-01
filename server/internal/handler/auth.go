@@ -157,9 +157,13 @@ func IPBlacklistMiddleware() gin.HandlerFunc {
 // RateLimitMiddleware 全局请求频率限制
 func RateLimitMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 排除 Agent 高频接口（report 和 ws 需要高频通信）
+		// 排除静态页面/资源和 Agent 高频接口（report / ws / stager / payload 需要稳定访问）
 		path := c.Request.URL.Path
-		if path == "/api/agent/report" || path == "/ws/agent" || path == "/api/agent/download" || path == "/api/agent/download-win" || path == "/api/agent/install.sh" || path == "/api/agent/install.ps1" {
+		if path == "/" || path == "/favicon.ico" || strings.HasPrefix(path, "/assets/") ||
+			path == "/api/agent/report" || path == "/ws/agent" ||
+			path == "/api/agent/download" || path == "/api/agent/download-win" ||
+			path == "/api/agent/install.sh" || path == "/api/agent/install.ps1" || path == "/api/agent/cleanup.ps1" ||
+			path == "/api/agent/payload" || path == "/api/agent/stager" || path == "/api/agent/cradle" || path == "/api/agent/cradle-b64" {
 			c.Next()
 			return
 		}
